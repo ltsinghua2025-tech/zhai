@@ -3,7 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="查看 ZHAI 的公文排版实测样例，了解办公流程如何发布为可离线运行的能力包。">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="description" content="在浏览器中直接体验 ZHAI 公文排版，无需安装或配置 API。">
   <meta name="theme-color" content="#122e3a">
   <title>ZHAI · 文件处理工作台</title>
   <link rel="stylesheet" href="./style.css">
@@ -13,6 +14,7 @@
     <nav class="wrap nav" aria-label="网站导航">
       <a class="wordmark" href="./">ZHAI</a>
       <div class="nav-links">
+        <a href="#try">在线排版</a>
         <a href="#demo">公文样例</a>
         <a href="https://github.com/ltsinghua2025-tech/zhai">源码 <span aria-hidden="true">↗</span></a>
       </div>
@@ -22,13 +24,33 @@
       <h1>常用办公流程，<br>断网也能跑。</h1>
       <p class="intro">把公文排版、材料汇总等做法保存为能力包。验证并发布后，换一批文件就能在本机复用。</p>
       <div class="hero-links">
-        <a class="button button-light" href="#demo">查看公文排版样例 <span aria-hidden="true">↓</span></a>
+        <a class="button button-light" href="#try">开始在线体验 <span aria-hidden="true">↓</span></a>
         <a class="text-link" href="https://github.com/ltsinghua2025-tech/zhai/releases/tag/v0.27.1">下载桌面版 <span aria-hidden="true">↗</span></a>
       </div>
     </div>
   </header>
   <main>
-    <div class="preview-note"><div class="wrap"><strong>浏览器预览</strong> <span>展示合成样例和已生成的成果。处理自己的文件请使用桌面版。</span></div></div>
+    <div class="preview-note"><div class="wrap"><strong>浏览器体验</strong> <span>选一个 DOCX，直接在浏览器排版。文件不会上传，也不需要 API Key。</span></div></div>
+    <section class="wrap try" id="try" aria-labelledby="try-title">
+      <div class="section-head">
+        <h2 id="try-title">在线公文排版</h2>
+        <p>支持单份 DOCX（不超过 10 MB）。标题后空一行，正文固定 28 磅，保留原有加粗。</p>
+      </div>
+      <form id="format-form" class="format-form">
+        <div class="format-inputs">
+          <div class="format-file">
+            <label for="format-file">选择 Word 文件</label>
+            <input id="format-file" type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" aria-describedby="format-hint">
+          </div>
+          <button id="use-sample" type="button" class="button-outline">使用合成样例</button>
+          <button id="format-submit" type="submit" class="button-primary">开始排版</button>
+        </div>
+        <p id="format-hint">首次运行需加载约 15 MB 的排版组件。排版后会生成新的 Word 文件。</p>
+        <p id="format-status" role="status" aria-live="polite" hidden></p>
+        <ul id="format-notes" hidden></ul>
+        <a id="format-download" class="download" hidden>下载排版后的 DOCX <span aria-hidden="true">↓</span></a>
+      </form>
+    </section>
     <section class="wrap demo" id="demo" aria-labelledby="demo-title">
       <div class="section-head">
         <span class="eyebrow">桌面实测 / Mac 0.27.1</span>
