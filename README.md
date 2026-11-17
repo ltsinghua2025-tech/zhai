@@ -2,7 +2,7 @@
 
 ZHAI 可以批量排版 Word、公文套红、合并 Excel 和处理 PDF。经样本测试后发布的离线能力包由本地文件引擎执行。使用这类能力包无需 API Key、网络或本地模型，成果另存为新文件。
 
-[浏览器预览](https://ltsinghua2025-tech.github.io/zhai/)提供公文排版前后对照和实测合成样例下载。处理自己的文件请安装桌面版。
+[浏览器体验](https://ltsinghua2025-tech.github.io/zhai/)可直接运行公文排版，支持内置合成样例和单个不超过 10 MB 的 DOCX。排版在浏览器中完成，无需填写 API Key。桌面版提供批量操作、更多能力包和联网文件 Agent。网站依赖使用 `python3 preview/build_browser_runtime.py` 构建，授权与校验见 `preview/runtime/`。
 
 ## 下载与安装
 
