@@ -1,0 +1,72 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "zhai",
+  "version": "0.27.1",
+  "identifier": "cn.materialworkbench.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "zhai · 定制你的办公AI",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 1040,
+        "minHeight": 680,
+        "center": true,
+        "resizable": true,
+        "decorations": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
+      }
+    ],
+    "security": {
+      "csp": {
+        "default-src": "'self'",
+        "connect-src": "'self' ipc: http://ipc.localhost",
+        "font-src": "'self' data:",
+        "img-src": "'self' asset: http://asset.localhost https: data: blob:",
+        "style-src": "'self' 'unsafe-inline'"
+      },
+      "assetProtocol": {
+        "enable": true,
+        "scope": []
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg"],
+    "externalBin": [
+      "binaries/material-workshop-engine",
+      "binaries/material-workshop-vision-ocr",
+      "binaries/officecli",
+      "binaries/codex"
+    ],
+    "resources": [
+      "binaries/OfficeCLI-LICENSE.txt",
+      "binaries/OfficeCLI-THIRD-PARTY-NOTICES.txt",
+      "binaries/Codex-LICENSE.txt",
+      "binaries/Codex-NOTICE.txt"
+    ],
+    "category": "Productivity",
+    "shortDescription": "zhai · 定制你的办公AI",
+    "longDescription": "用户可以让联网 Agent 多轮协作，或直接运行可配置的本地能力包；只有明确标注的能力才会联网，原件永不覆盖。",
+    "macOS": {
+      "minimumSystemVersion": "13.0",
+      "hardenedRuntime": true
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}

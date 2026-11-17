@@ -1,0 +1,43 @@
+[package]
+name = "zhai"
+version = "0.27.1"
+description = "zhai - 银河麒麟 V10 SP1 兼容版"
+authors = ["zhai"]
+edition = "2021"
+
+[lib]
+name = "material_workshop_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+path = "../src-tauri/src/lib.rs"
+
+[[bin]]
+name = "zhai"
+path = "../src-tauri/src/main.rs"
+
+[features]
+default = ["kylin-legacy"]
+kylin-legacy = []
+custom-protocol = ["tauri/custom-protocol"]
+
+[build-dependencies]
+tauri-build = { version = "1.5", features = [] }
+
+[dependencies]
+tauri = { version = "1.8", features = [ "window-all", "dialog-open"] }
+tokio = { version = "1", features = ["time", "macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "6"
+futures = "0.3"
+hex = "0.4"
+keyring = { version = "3", features = ["linux-native-sync-persistent", "crypto-rust"] }
+libc = "0.2"
+parking_lot = "0.12"
+plist = "1"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4", "serde"] }
+walkdir = "2"

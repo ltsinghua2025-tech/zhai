@@ -1,0 +1,12 @@
+# Separate OCR component only; do not install into the ordinary engine build.
+# ONNX Runtime 1.23.2 supports macOS 13 and Linux aarch64 glibc 2.27+ wheels.
+rapidocr==3.10.0
+onnxruntime==1.23.2
+opencv-python-headless==4.12.0.88
+numpy==2.2.6
+omegaconf==2.3.0
+pypdfium2==4.30.0
+Pillow==13.0.0
+Shapely==2.2.0
+pyclipper==1.4.0
+PyYAML==6.0.3

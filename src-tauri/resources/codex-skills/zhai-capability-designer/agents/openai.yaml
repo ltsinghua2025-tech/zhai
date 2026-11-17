@@ -1,0 +1,4 @@
+interface:
+  display_name: "zhai 能力包设计器"
+  short_description: "设计、测试和维护可复用的政务办公能力包"
+  default_prompt: "Use $zhai-capability-designer to create or update a tested zhai capability package."

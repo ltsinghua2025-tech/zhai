@@ -1,0 +1,29 @@
+Codex 0.163.0 Linux bwrap dependency provenance
+Checked 2026-10-22 against the official rust-v0.163.0 source tag.
+
+Bubblewrap:
+The bundled source identifies version 0.11.2 and contains Codex-specific changes.
+License: LGPL-2.0-or-later; see Bubblewrap-COPYING.txt and Bubblewrap-LICENSE.txt.
+Corresponding Codex source and build scripts: source/codex-rust-v0.163.0-source.tar.gz
+Upstream: https://github.com/openai/codex/tree/rust-v0.163.0/codex-rs/vendor/bubblewrap
+
+libcap:
+The official .github/scripts/install-musl-build-tools.sh pins libcap 2.75,
+builds libcap.a with the musl compiler and supplies it to the bwrap build.
+Source: https://mirrors.edge.kernel.org/pub/linux/libs/security/linux-privs/libcap2/libcap-2.75.tar.xz
+SHA256: de4e7e064c9ba451d5234dd46e897d7c71c96a9ebf9a0c445bc04f4742d83632
+This source archive was downloaded and its hash checked during release preparation.
+License choice: BSD-3-Clause (the upstream also offers GPL-2.0-only).
+Libcap-2.75-LICENSE.txt preserves the complete upstream License file, including both options.
+Libcap-2.75-NOTICES.txt preserves source-file copyright headers from the library tree.
+
+musl:
+The official build script installs the distribution musl toolchain rather than
+pinning a musl source release. Do not infer an exact musl version from this notice.
+Musl-COPYRIGHT.txt is the upstream complete copyright/license notice retrieved on
+2026-10-22 from https://git.musl-libc.org/cgit/musl/plain/COPYRIGHT .
+It contains the MIT license and the upstream file-specific notices.
+
+The bwrap executable is the unmodified official release asset. These notices do
+not claim an exhaustive license audit of every dependency in the separate Codex
+executable. Codex's Apache-2.0 LICENSE and upstream NOTICE are also distributed.

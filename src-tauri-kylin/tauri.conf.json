@@ -1,0 +1,86 @@
+{
+  "$schema": "https://schema.tauri.app/config/1",
+  "package": {
+    "productName": "zhai",
+    "version": "0.27.1"
+  },
+  "build": {
+    "beforeBuildCommand": "VITE_KYLIN_LEGACY=1 npm run build",
+    "beforeDevCommand": "VITE_KYLIN_LEGACY=1 npm run dev",
+    "devPath": "http://localhost:1420",
+    "distDir": "../dist"
+  },
+  "tauri": {
+    "allowlist": {
+      "all": false,
+      "dialog": { "open": true },
+      "window": { "all": true }
+    },
+    "bundle": {
+      "active": true,
+      "category": "Productivity",
+      "deb": {
+        "depends": ["xdg-utils", "libcap2"],
+        "files": {
+          "/usr/lib/zhai/codex-resources/bwrap": "../src-tauri/binaries/codex-resources/bwrap",
+          "/usr/share/doc/zhai/codex/Libcap-2.75-LICENSE.txt": "../src-tauri/binaries/codex-resources/Libcap-2.75-LICENSE.txt",
+          "/usr/share/doc/zhai/codex/Libcap-2.75-NOTICES.txt": "../src-tauri/binaries/codex-resources/Libcap-2.75-NOTICES.txt",
+          "/usr/share/doc/zhai/codex/Musl-COPYRIGHT.txt": "../src-tauri/binaries/codex-resources/Musl-COPYRIGHT.txt",
+          "/usr/share/doc/zhai/codex/DEPENDENCY-SOURCES.txt": "../src-tauri/binaries/codex-resources/DEPENDENCY-SOURCES.txt",
+          "/usr/share/doc/zhai/codex/Bubblewrap-COPYING.txt": "../src-tauri/binaries/codex-resources/Bubblewrap-COPYING.txt",
+          "/usr/share/doc/zhai/codex/Bubblewrap-LICENSE.txt": "../src-tauri/binaries/codex-resources/Bubblewrap-LICENSE.txt",
+          "/usr/share/doc/zhai/codex/source/codex-rust-v0.163.0-source.tar.gz": "../src-tauri/binaries/codex-resources/source/codex-rust-v0.163.0-source.tar.gz",
+          "/usr/share/doc/zhai/bubblewrap/LGPL-2.1.txt": "../src-tauri/binaries/Bubblewrap-LGPL-2.1.txt",
+          "/usr/share/doc/zhai/bubblewrap/source/bubblewrap-0.12.0.tar.gz": "../src-tauri/binaries/bubblewrap-source/bubblewrap-0.12.0.tar.gz",
+          "/usr/share/doc/zhai/bubblewrap/source/build-bwrap-kylin.sh": "../src-tauri/binaries/bubblewrap-source/build-bwrap-kylin.sh",
+          "/usr/share/doc/zhai/bubblewrap/source/test-statfs.patch": "../src-tauri/binaries/bubblewrap-source/test-statfs.patch",
+          "/usr/lib/zhai/antiword/UTF-8.txt": "../src-tauri/binaries/antiword-data/UTF-8.txt",
+          "/usr/lib/zhai/antiword/fontnames": "../src-tauri/binaries/antiword-data/fontnames",
+          "/usr/share/doc/zhai/antiword/COPYRIGHT.txt": "../src-tauri/binaries/Antiword-COPYRIGHT.txt",
+          "/usr/share/doc/zhai/antiword/GPL-2.txt": "../src-tauri/binaries/Antiword-GPL-2.txt",
+          "/usr/share/doc/zhai/WPS-Linux-Bridge-README.txt": "../src-tauri/binaries/WPS-Linux-Bridge-README.txt",
+          "/usr/share/doc/zhai/antiword/source/antiword_0.37-16.dsc": "../src-tauri/binaries/antiword-source/antiword_0.37-16.dsc",
+          "/usr/share/doc/zhai/antiword/source/antiword_0.37-16.debian.tar.xz": "../src-tauri/binaries/antiword-source/antiword_0.37-16.debian.tar.xz",
+          "/usr/share/doc/zhai/antiword/source/antiword_0.37.orig.tar.gz": "../src-tauri/binaries/antiword-source/antiword_0.37.orig.tar.gz"
+        }
+      },
+      "externalBin": [
+        "../src-tauri/binaries/material-workshop-engine",
+        "../src-tauri/binaries/officecli",
+        "../src-tauri/binaries/zhai-antiword",
+        "../src-tauri/binaries/zhai-bwrap",
+        "../src-tauri/binaries/codex"
+      ],
+      "resources": [
+        "../src-tauri/binaries/Codex-LICENSE.txt",
+        "../src-tauri/binaries/Codex-NOTICE.txt",
+        "../src-tauri/binaries/OfficeCLI-LICENSE.txt",
+        "../src-tauri/binaries/OfficeCLI-THIRD-PARTY-NOTICES.txt"
+      ],
+      "icon": [
+        "../src-tauri/icons/32x32.png",
+        "../src-tauri/icons/128x128.png",
+        "../src-tauri/icons/128x128@2x.png"
+      ],
+      "identifier": "cn.materialworkbench.desktop",
+      "longDescription": "zhai 文件处理 Agent 的银河麒麟 V10 SP1 ARM64 兼容版，内置旧版 DOC 读取器，不捆绑 LibreOffice；可探测外部 WPS Linux 桥接。",
+      "shortDescription": "zhai · 定制你的办公AI",
+      "targets": ["deb"]
+    },
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost https:; font-src 'self' data:; img-src 'self' asset: http://asset.localhost data: blob:; style-src 'self' 'unsafe-inline'"
+    },
+    "windows": [
+      {
+        "center": true,
+        "decorations": true,
+        "height": 820,
+        "minHeight": 680,
+        "minWidth": 1040,
+        "resizable": true,
+        "title": "zhai · 定制你的办公AI",
+        "width": 1280
+      }
+    ]
+  }
+}

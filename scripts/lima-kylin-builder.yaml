@@ -1,0 +1,17 @@
+arch: aarch64
+cpus: 4
+memory: 8GiB
+disk: 45GiB
+
+images:
+  - location: "https://cloud-images.ubuntu.com/focal/current/focal-server-cloudimg-arm64.img"
+    arch: aarch64
+
+mountType: virtiofs
+mounts:
+  - location: "__ZHAI_PROJECT_DIR__"
+    writable: true
+
+containerd:
+  system: false
+  user: false
