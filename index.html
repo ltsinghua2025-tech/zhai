@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="查看 ZHAI 的公文排版实测样例，了解办公流程如何发布为可离线运行的能力包。">
+  <meta name="theme-color" content="#122e3a">
+  <title>ZHAI · 文件处理工作台</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <header class="masthead">
+    <nav class="wrap nav" aria-label="网站导航">
+      <a class="wordmark" href="./">ZHAI</a>
+      <div class="nav-links">
+        <a href="#demo">公文样例</a>
+        <a href="https://github.com/ltsinghua2025-tech/zhai">源码 <span aria-hidden="true">↗</span></a>
+      </div>
+    </nav>
+    <div class="wrap hero">
+      <p class="eyebrow">ZHAI / 政务文件处理工作台</p>
+      <h1>常用办公流程，<br>断网也能跑。</h1>
+      <p class="intro">把公文排版、材料汇总等做法保存为能力包。验证并发布后，换一批文件就能在本机复用。</p>
+      <div class="hero-links">
+        <a class="button button-light" href="#demo">查看公文排版样例 <span aria-hidden="true">↓</span></a>
+        <a class="text-link" href="https://github.com/ltsinghua2025-tech/zhai/releases/tag/v0.27.1">下载桌面版 <span aria-hidden="true">↗</span></a>
+      </div>
+    </div>
+  </header>
+  <main>
+    <div class="preview-note"><div class="wrap"><strong>浏览器预览</strong> <span>展示合成样例和已生成的成果。处理自己的文件请使用桌面版。</span></div></div>
+    <section class="wrap demo" id="demo" aria-labelledby="demo-title">
+      <div class="section-head">
+        <span class="eyebrow">桌面实测 / Mac 0.27.1</span>
+        <h2 id="demo-title">同一份公文，排版前后。</h2>
+        <p>选择前后视图，核对标题、行距和加粗。两张图来自同一份合成样例。</p>
+      </div>
+      <div class="sample-layout">
+        <div class="sample-view">
+          <div class="sample-bar">
+            <span class="file-label">材料报送.docx</span>
+            <div class="switch" role="group" aria-label="选择公文视图">
+              <button type="button" data-view="before" aria-pressed="false">排版前</button>
+              <button type="button" data-view="after" aria-pressed="true">排版后</button>
+            </div>
+          </div>
+          <figure>
+            <img id="sample-image" src="./assets/after.png" width="885" height="565" alt="排版后样例。标题居中，正文按指定行距排列，保留原有粗体。">
+            <figcaption id="sample-caption" aria-live="polite">排版后 · 标题居中，正文固定 28 磅，原有加粗保留</figcaption>
+          </figure>
+        </div>
+        <aside class="sample-detail" aria-label="实测记录">
+          <p class="eyebrow">本轮指令节选</p>
+          <blockquote>“标题居中，标题后空一行，正文固定 28 磅，保留原有加粗。”</blockquote>
+          <p class="measure"><strong>3 / 3</strong><span>三份合成 DOCX 全部交付</span></p>
+          <p class="measure"><strong>约 54 秒</strong><span>从发送指令到该轮会话完成</span></p>
+          <a class="download" href="./assets/sample-formatted.docx" download="ZHAI-合成公文排版成果.docx">下载样例成果 DOCX <span aria-hidden="true">↓</span></a>
+        </aside>
+      </div>
+    </section>
+    <section class="workflow" aria-labelledby="workflow-title">
+      <div class="wrap workflow-inner">
+        <div>
+          <h2 id="workflow-title">下一批材料，用同一套规则。</h2>
+          <p>已发布的离线能力包由本地文件引擎执行，无需调用云端或本地模型。</p>
+        </div>
+        <ol aria-label="能力包的使用流程"><li>保存流程</li><li>样本测试</li><li>发布能力包</li><li>更换材料离线运行</li></ol>
+      </div>
+    </section>
+  </main>
+  <footer class="wrap footer">
+    <a class="wordmark" href="./">ZHAI</a>
+    <span>MIT 开源 · 联网功能由使用者自行配置 API</span>
+    <a href="https://github.com/ltsinghua2025-tech/zhai/releases/tag/v0.27.1">桌面版下载 <span aria-hidden="true">↗</span></a>
+  </footer>
+  <script src="./preview.js" defer></script>
+</body>
+</html>
