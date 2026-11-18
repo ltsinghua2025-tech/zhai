@@ -80,6 +80,7 @@ export function openDialog(options: Parameters<typeof openV2>[0]): Promise<strin
         webSelections.set(token, files);
         resolve(token);
       };
+      input.addEventListener("cancel", () => resolve(null), { once: true });
       input.click();
     });
   }

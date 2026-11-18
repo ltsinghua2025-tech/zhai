@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { onFileDrop, openDialog as open } from "./lib/tauriCompat";
+import { onFileDrop, openDialog as open, randomId } from "./lib/tauriCompat";
 import {
   ArrowLeft,
   ArrowUp,
@@ -27,7 +27,13 @@ import {
   cancelAgentTurn,
   cancelSkillDesign,
   createAgentSession,
-  designAgentTool,
+  designAndTestSkill,
+  testAndRepairSkill,
+  getSkillDesignState,
+  getTaskSkillSeed,
+  saveSkillDesignState,
+  getSkill,
+  publishSkill,
   deleteAgentSession,
   getAgentSession,
   getPythonExecutionStatus,
@@ -39,7 +45,6 @@ import {
   renameAgentSession,
   promoteAgentRunToSkill,
   revealInFinder,
-  saveAgentTool,
   sendAgentMessage,
 } from "./lib/backend";
 import type {
@@ -53,8 +58,12 @@ import type {
   DesignAttachment,
   SkillDesignEvent,
   PythonExecutionStatus,
+  SkillDesignState,
+  SkillTestResult,
+  DesignToolRequest,
 } from "./types";
 import MarkdownMessage from "./MarkdownMessage";
+import { SkillTestPanel, skillInputExtensions, skillInputProblem } from "./SkillTestPanel";
 import { artifactsForMessage } from "./lib/messageArtifacts";
 import shellAvatar from "./assets/zhai-shell-avatar.png";
 import { isWebApiEnabled } from "./lib/webApi";
@@ -62,6 +71,7 @@ import { isWebApiEnabled } from "./lib/webApi";
 const supportedExtensions = [
   "docx",
   "xlsx",
+  "xlsm",
   "pptx",
   "pdf",
   "csv",
@@ -165,17 +175,17 @@ type MaterialGroup = {
 };
 
 type Props = {
+  active?: boolean;
   profile?: AiProfile;
   apiKey: string;
   openModels: () => void;
   designTarget?: AgentTool;
   startInDesignMode?: boolean;
   onSkillSaved?: (skill: AgentTool) => void;
+  onDesignTargetHandled?: () => void;
 };
 
-type SkillDesignPhase = "brief" | "loading_skill" | "editing" | "testing" | "repairing" | "saving" | "ready";
-
-export default function AgentWorkspace({ profile, apiKey, openModels, designTarget, startInDesignMode, onSkillSaved }: Props) {
+export default function AgentWorkspace({ active = true, profile, apiKey, openModels, designTarget, startInDesignMode, onSkillSaved, onDesignTargetHandled }: Props) {
   const webMode = isWebApiEnabled();
   const [sessions, setSessions] = useState<AgentSession[]>([]);
   const [activeId, setActiveId] = useState<string>();
@@ -193,7 +203,6 @@ export default function AgentWorkspace({ profile, apiKey, openModels, designTarg
   const [turnModel, setTurnModel] = useState(profile?.defaultModel || "");
   const [showProcess, setShowProcess] = useState(false);
   const [contextOpen, setContextOpen] = useState(true);
-  const [savedSkillRuns, setSavedSkillRuns] = useState<Set<string>>(new Set());
   const [notice, setNotice] = useState<string>();
   const [agentPhase, setAgentPhase] = useState<string>();
   const [stopping, setStopping] = useState(false);
@@ -201,6 +210,9 @@ export default function AgentWorkspace({ profile, apiKey, openModels, designTarg
     startInDesignMode || designTarget ? "skill" : "files",
   );
   const [skillDraft, setSkillDraft] = useState<AgentTool | undefined>(designTarget);
+  const needsSamples = !skillDraft || skillDraft.supportedExtensions.length > 0;
+  const designModeRef = useRef(false);
+  designModeRef.current = workspaceMode === "skill";
   const [skillMessages, setSkillMessages] = useState<Array<{ role: "user" | "assistant"; content: string }>>([]);
   const [skillAttachmentRoles, setSkillAttachmentRoles] = useState<Record<string, DesignAttachment["role"]>>({});
   const [skillDesignStatus, setSkillDesignStatus] = useState<string>();
@@ -208,7 +220,19 @@ export default function AgentWorkspace({ profile, apiKey, openModels, designTarg
   const skillDesignProgress = skillDesignStatus && busy
     ? `${skillDesignStatus} · ${skillDesignElapsed} 秒`
     : skillDesignStatus;
-  const [skillDesignPhase, setSkillDesignPhase] = useState<SkillDesignPhase>("brief");
+  const [designParameters, setDesignParameters] = useState<Record<string, unknown>>({});
+  const [testResult, setTestResult] = useState<SkillTestResult>();
+  const [designSessionId, setDesignSessionId] = useState<string>();
+  const [sourceTask, setSourceTask] = useState<SkillDesignState["sourceTask"]>();
+  const [sourceContext, setSourceContext] = useState<string>();
+  const designRunIdRef = useRef<string | undefined>(undefined);
+  const designSaveQueue = useRef<Promise<unknown>>(Promise.resolve());
+  const booted = useRef(false);
+  const consumedTarget = useRef<string | undefined>(undefined);
+  const busyRef = useRef(false);
+  busyRef.current = busy;
+  const dropEnabledRef = useRef(false);
+  dropEnabledRef.current = active && !loading;
   const scrollRef = useRef<HTMLDivElement>(null);
   const activeIdRef = useRef<string | undefined>(undefined);
   const sessionsRef = useRef<AgentSession[]>([]);
@@ -254,22 +278,6 @@ export default function AgentWorkspace({ profile, apiKey, openModels, designTarg
     setTurnModel(profile?.defaultModel || "");
   }, [profile?.id, profile?.defaultModel]);
 
-  useEffect(() => {
-    if (!designTarget) return;
-    skillDesignIdRef.current = undefined;
-    setWorkspaceMode("skill");
-    setSkillDesignPhase("brief");
-    setSkillDraft(designTarget);
-    setSkillMessages([
-      {
-        role: "assistant",
-        content: designTarget.source === "builtin"
-          ? `已载入内置能力“${designTarget.name}”作为只读基础。你描述修改后，我会另存为自建能力包，不会改变系统内置版本。`
-          : `已载入自建能力包“${designTarget.name}”。你可以继续添加样本、正确成果或参考文件夹，然后直接告诉我要怎么修改。`,
-      },
-    ]);
-  }, [designTarget?.id]);
-
   const refreshSessions = async (preferId?: string) => {
     const items = await listAgentSessions();
     sessionsRef.current = items;
@@ -281,11 +289,108 @@ export default function AgentWorkspace({ profile, apiKey, openModels, designTarg
     else setDetail(undefined);
   };
 
+  const resetDesign = () => {
+    setDesignSessionId(undefined);
+    skillDesignIdRef.current = undefined;
+    setSkillDraft(undefined);
+    setSkillMessages([]);
+    setSkillAttachmentRoles({});
+    setDesignParameters({});
+    setSourceTask(undefined);
+    setSourceContext(undefined);
+    setTestResult(undefined);
+    setSkillDesignStatus(undefined);
+    setSkillDesignElapsed(0);
+    setNotice(undefined);
+    setError(undefined);
+    setInput("");
+    setShowUrl(false);
+    setUrlInput("");
+  };
+  const restoreDesign = async (sessionId: string) => {
+    setDesignSessionId(undefined);
+    const stored = await getSkillDesignState(sessionId);
+    const skill = stored?.skillId ? await getSkill(stored.skillId).catch(() => undefined) : undefined;
+    const seed = stored?.sourceTask ? await getTaskSkillSeed(stored.sourceTask.sessionId, stored.sourceTask.turnId).catch(() => undefined) : undefined;
+    if (activeIdRef.current !== sessionId) return;
+    resetDesign();
+    setWorkspaceMode(stored ? "skill" : "files");
+    if (stored) {
+      skillDesignIdRef.current = stored.designId;
+      setSkillDraft(skill);
+      setSkillMessages(stored.messages);
+      setSkillAttachmentRoles(stored.attachmentRoles);
+      setDesignParameters(stored.parameters);
+      setTestResult(stored.testResult);
+      setSourceTask(stored.sourceTask);
+      setSourceContext(seed?.prompt);
+      setDesignSessionId(sessionId);
+      if (stored.skillId && !skill) setError("这份设计的能力包已移除，设计记录和样本仍保留。");
+    }
+  };
+  const designSnapshot = (): SkillDesignState => ({
+    designId: skillDesignIdRef.current || randomId(), skillId: skillDraft?.id,
+    messages: skillMessages, attachmentRoles: skillAttachmentRoles, parameters: designParameters, testResult, sourceTask,
+  });
+  const queueDesignSave = (sessionId: string, snapshot: SkillDesignState) => {
+    const pending = designSaveQueue.current.catch(() => undefined).then(() => saveSkillDesignState(sessionId, snapshot));
+    designSaveQueue.current = pending;
+    return pending;
+  };
+  const flushDesign = async () => {
+    if (designSessionId && designSessionId === activeIdRef.current) await queueDesignSave(designSessionId, designSnapshot());
+    else await designSaveQueue.current;
+  };
   useEffect(() => {
-    refreshSessions()
-      .catch((reason) => setError(String(reason)))
-      .finally(() => setLoading(false));
-  }, []);
+    if (!designSessionId || designSessionId !== activeId || loading || busy) return;
+    queueDesignSave(designSessionId, designSnapshot()).catch(reason => {
+      if (activeIdRef.current === designSessionId) setError(`设计记录保存失败：${String(reason)}`);
+    });
+  }, [designSessionId, activeId, skillDraft, skillMessages, skillAttachmentRoles, designParameters, testResult, sourceTask, loading, busy]);
+  const createFreshSession = async (mode: "files" | "skill", target?: AgentTool) => {
+    const selectedProfile = profileRef.current || profile;
+    if (!selectedProfile) { openModels(); return; }
+    await flushDesign();
+    const created = await createAgentSession({ profileId: selectedProfile.id, model: turnModelRef.current || selectedProfile.defaultModel, title: mode === "skill" ? target ? `设计 · ${target.name}` : "新能力设计" : undefined });
+    activeIdRef.current = created.id;
+    resetDesign();
+    setWorkspaceMode(mode);
+    setStreaming("");
+    setLiveRuns([]);
+    await refreshSessions(created.id);
+    if (mode === "skill") {
+      const snapshot: SkillDesignState = { designId: randomId(), skillId: target?.id, messages: target ? [{ role: "assistant", content: `已载入“${target.name}”。${target.supportedExtensions.length ? "添加样本后可测试" : "可填写参数后直接测试"}，也可以说明要调整的规则。${target.source === "builtin" ? "内置能力将另存为派生能力。" : ""}` }] : [], attachmentRoles: {}, parameters: Object.fromEntries((target?.parameters || []).filter(p => p.defaultValue !== undefined).map(p => [p.key, p.defaultValue])) };
+      skillDesignIdRef.current = snapshot.designId;
+      setSkillDraft(target);
+      setSkillMessages(snapshot.messages);
+      setDesignParameters(snapshot.parameters);
+      await queueDesignSave(created.id, snapshot);
+      setDesignSessionId(created.id);
+    }
+    return created;
+  };
+  useEffect(() => {
+    if (!profile || booted.current) return;
+    booted.current = true;
+    const initialize = async () => {
+      if (startInDesignMode || designTarget) {
+        consumedTarget.current = designTarget?.id;
+        await createFreshSession("skill", designTarget);
+        onDesignTargetHandled?.();
+      } else {
+        await refreshSessions();
+        if (activeIdRef.current) await restoreDesign(activeIdRef.current);
+      }
+    };
+    initialize().catch(reason => setError(String(reason))).finally(() => setLoading(false));
+  }, [profile?.id]);
+  useEffect(() => {
+    if (!designTarget) { consumedTarget.current = undefined; return; }
+    if (loading || busy || consumedTarget.current === designTarget.id) return;
+    consumedTarget.current = designTarget.id;
+    setBusy(true);
+    createFreshSession("skill", designTarget).then(() => onDesignTargetHandled?.()).catch(reason => setError(String(reason))).finally(() => setBusy(false));
+  }, [designTarget?.id, loading, busy]);
 
   useEffect(() => {
     const element = scrollRef.current;
@@ -295,7 +400,7 @@ export default function AgentWorkspace({ profile, apiKey, openModels, designTarg
     } else {
       element.scrollTop = element.scrollHeight;
     }
-  }, [detail?.messages.length, liveRuns.length, streaming]);
+  }, [detail?.messages.length, skillMessages.length, liveRuns.length, streaming]);
 
   useEffect(() => {
     const element = scrollRef.current;
@@ -308,18 +413,28 @@ export default function AgentWorkspace({ profile, apiKey, openModels, designTarg
     let disposed = false;
     let cleanup: (() => void) | undefined;
     onFileDrop(async (paths) => {
+          if (!dropEnabledRef.current || busyRef.current || creatingNewRef.current) return;
+          busyRef.current = true;
+          setBusy(true);
+          setError(undefined);
+          setNotice(undefined);
           try {
             const session = await ensureSession();
-            await addAgentAttachments(
+            const added = await addAgentAttachments(
               session.id,
               paths.map((path) => ({
                 kind: "file" as const,
                 path,
               })),
+              designModeRef.current,
             );
             await refreshSessions(session.id);
+            reportMaterialImport(added);
           } catch (reason) {
             setError(String(reason));
+          } finally {
+            busyRef.current = false;
+            setBusy(false);
           }
         }).then((unlisten) => {
           if (disposed) unlisten();
@@ -362,44 +477,56 @@ export default function AgentWorkspace({ profile, apiKey, openModels, designTarg
   };
 
   const createNew = async () => {
-    if (busy || creatingNewRef.current) return;
-    if (!profile) {
-      openModels();
-      return;
-    }
+    if (busy || loading || creatingNewRef.current) return;
     creatingNewRef.current = true;
-    setError(undefined);
+    setBusy(true);
+    try { await createFreshSession(workspaceMode); }
+    catch (reason) { setError(String(reason)); }
+    finally { creatingNewRef.current = false; setBusy(false); }
+  };
+  const chooseSession = async (sessionId: string) => {
+    if (busy || loading) return;
+    setBusy(true);
     try {
-      const created = await createAgentSession({
-        profileId: profile.id,
-        model: turnModel || profile.defaultModel,
-      });
-      activeIdRef.current = created.id;
-      await refreshSessions(created.id);
-      setInput("");
+      await flushDesign();
+      setDesignSessionId(undefined);
+      activeIdRef.current = sessionId;
+      setActiveId(sessionId);
       setStreaming("");
       setLiveRuns([]);
-    } finally {
-      creatingNewRef.current = false;
+      setDetail(await getAgentSession(sessionId));
+      await restoreDesign(sessionId);
+    } catch (reason) { setError(String(reason)); }
+    finally { setBusy(false); }
+  };
+  const changeMode = async (mode: "skill" | "files") => {
+    if (busy || loading || mode === workspaceMode) return;
+    setBusy(true);
+    try { await createFreshSession(mode); }
+    catch (reason) { setError(String(reason)); }
+    finally { setBusy(false); }
+  };
+
+  function reportMaterialImport(added: AgentAttachment[]) {
+    if (added.length > 0) {
+      setTestResult(undefined);
+      setNotice(`已添加 ${added.length} 份材料。`);
+    } else {
+      setNotice(undefined);
+      const skipped = designModeRef.current ? "扫描文件夹时会跳过隐藏项目和符号链接。" : "";
+      setError(`本次没有添加新材料。请选择包含受支持文件的来源，并检查材料是否已添加。${skipped}`);
     }
-  };
+  }
 
-  const chooseSession = async (sessionId: string) => {
-    if (busy) return;
-    activeIdRef.current = sessionId;
-    setActiveId(sessionId);
-    setStreaming("");
-    setLiveRuns([]);
-    setError(undefined);
-    setDetail(await getAgentSession(sessionId));
-  };
-
-  const addFiles = async () => {
+  const addFiles = async (asTestSample = false) => {
+    if (busyRef.current || loading) return;
+    busyRef.current = true; setBusy(true); setError(undefined); setNotice(undefined);
+    try {
     const selection = await open({
       directory: false,
       multiple: true,
-      title: "添加文件到当前会话",
-      filters: [{ name: "办公材料", extensions: supportedExtensions }],
+      title: asTestSample ? "添加原始测试样本" : "添加文件到当前会话",
+      filters: [{ name: "办公材料", extensions: asTestSample && skillDraft ? skillInputExtensions(skillDraft) : supportedExtensions }],
     });
     const paths = Array.isArray(selection)
       ? selection
@@ -408,14 +535,21 @@ export default function AgentWorkspace({ profile, apiKey, openModels, designTarg
         : [];
     if (paths.length === 0) return;
     const session = await ensureSession();
-    await addAgentAttachments(
+    const added = await addAgentAttachments(
       session.id,
       paths.map((path) => ({ kind: "file", path })),
+      workspaceMode === "skill",
     );
     await refreshSessions(session.id);
+    reportMaterialImport(added);
+    } catch (reason) { setError(`添加文件失败：${String(reason)}`); }
+    finally { busyRef.current = false; setBusy(false); }
   };
 
-  const addFolder = async () => {
+  const addFolder = async (asReference = false) => {
+    if (busyRef.current || loading) return;
+    busyRef.current = true; setBusy(true); setError(undefined); setNotice(undefined);
+    try {
     const selection = await open({
       directory: true,
       multiple: false,
@@ -423,17 +557,26 @@ export default function AgentWorkspace({ profile, apiKey, openModels, designTarg
     });
     if (typeof selection !== "string") return;
     const session = await ensureSession();
-    await addAgentAttachments(session.id, [
+    const added = await addAgentAttachments(session.id, [
       { kind: "folder", path: selection },
-    ]);
+    ], workspaceMode === "skill");
+    if (asReference && added.length) {
+      setSkillAttachmentRoles(current => ({ ...current, ...Object.fromEntries(added.map(item => [item.id, "reference" as const])) }));
+    }
     await refreshSessions(session.id);
+    reportMaterialImport(added);
+    } catch (reason) { setError(`添加文件夹失败：${String(reason)}`); }
+    finally { busyRef.current = false; setBusy(false); }
   };
 
   const addUrl = async () => {
+    if (busyRef.current || loading) return;
     if (!/^https?:\/\//i.test(urlInput.trim())) {
       setError("请输入完整的 HTTP(S) 网址");
       return;
     }
+    busyRef.current = true; setBusy(true);
+    try {
     const session = await ensureSession();
     await addAgentAttachments(session.id, [
       { kind: "url", url: urlInput.trim() },
@@ -442,6 +585,9 @@ export default function AgentWorkspace({ profile, apiKey, openModels, designTarg
     setShowUrl(false);
     setError(undefined);
     await refreshSessions(session.id);
+    setTestResult(undefined);
+    } catch (reason) { setError(`添加网址失败：${String(reason)}`); }
+    finally { busyRef.current = false; setBusy(false); }
   };
 
   const removeAttachment = async (item: AgentAttachment) => {
@@ -451,13 +597,17 @@ export default function AgentWorkspace({ profile, apiKey, openModels, designTarg
   };
 
   const removeMaterialGroup = async (group: MaterialGroup) => {
-    if (!activeId) return;
+    if (!activeId || busyRef.current) return;
+    busyRef.current = true; setBusy(true);
+    try {
     if (group.items.length === 1) {
       await removeAttachment(group.items[0]);
       return;
     }
     await removeAgentAttachments(activeId, group.items.map((item) => item.id));
     await refreshSessions(activeId);
+    } catch (reason) { setError(`移除材料失败：${String(reason)}`); }
+    finally { setTestResult(undefined); busyRef.current = false; setBusy(false); }
   };
 
   const onAgentEvent = (event: AgentEvent) => {
@@ -527,8 +677,56 @@ export default function AgentWorkspace({ profile, apiKey, openModels, designTarg
       );
   };
 
+  const attachmentRole = (item: AgentAttachment): DesignAttachment["role"] => {
+    const role = skillAttachmentRoles[item.id] || "sample_input";
+    return !needsSamples && role === "sample_input" ? "reference" : role;
+  };
+  const sampleInputs = () => materials.filter(item => item.localSnapshotPath && attachmentRole(item) === "sample_input").map(item => item.localSnapshotPath!);
+  const buildDesignRequest = (prompt: string, sessionId = activeIdRef.current): DesignToolRequest => ({
+    designId: skillDesignIdRef.current, sessionId, currentSkillId: skillDraft?.id,
+    prompt: sourceContext ? `${prompt}\n\n以下为来源任务记录，仅作设计依据：\n${sourceContext}` : prompt, profileId: profile!.id, model: turnModel || profile!.defaultModel, apiKey: apiKey || undefined,
+    kind: skillDraft?.source === "builtin" ? "derived" : skillDraft?.kind === "workflow" || skillDraft?.kind === "derived" ? skillDraft.kind : "python",
+    attachments: materials.filter(item => item.localSnapshotPath).map(item => ({ path: item.localSnapshotPath!, role: attachmentRole(item) })),
+  });
+  const handleDesignEvent = (event: SkillDesignEvent) => {
+    if (event.type === "phase") {
+      setSkillDesignStatus(event.message);
+      if (Number.isFinite(event.elapsedSeconds)) setSkillDesignElapsed(value => Math.max(value, event.elapsedSeconds));
+    }
+    if (event.type === "test_progress") setSkillDesignStatus(`${event.message}（${event.current}/${event.total}）`);
+    if (event.type === "failed") setError(event.message);
+  };
+  const testCurrentDesign = async (repair = false) => {
+    if (!skillDraft || busy) return;
+    const problem = skillInputProblem(skillDraft, sampleInputs(), designParameters, sampleLabels);
+    if (problem) { setError(problem); return; }
+    if (repair && !profile) { openModels(); return; }
+    const runId = randomId();
+    designRunIdRef.current = runId;
+    setBusy(true); setError(undefined); setStopping(false); setSkillDesignElapsed(0);
+    setTestResult(undefined);
+    setSkillDesignStatus(repair ? "正在测试并准备修复" : "正在测试当前样本");
+    try {
+      await flushDesign();
+      const result = await testAndRepairSkill({ runId, designId: skillDesignIdRef.current, skillId: skillDraft.id, samplePaths: sampleInputs(), parameters: designParameters,
+        repair: repair ? buildDesignRequest("请根据正式样本测试的实际错误修复现有能力，保留原有规则；修复后用同一组样本和参数重测。") : undefined,
+      }, handleDesignEvent);
+      setSkillDraft(result.skill); setTestResult(result.testResult);
+      if (result.testResult) setDesignParameters(result.testResult.parameters);
+      onSkillSaved?.(result.skill);
+    } catch (reason) { setError(String(reason)); }
+    finally { setBusy(false); setStopping(false); setSkillDesignStatus(undefined); designRunIdRef.current = undefined; }
+  };
+  const publishCurrentDesign = async () => {
+    if (!skillDraft || busy || testResult?.status !== "passed") return;
+    setBusy(true);
+    try { const published = await publishSkill(skillDraft.id); setSkillDraft(published); onSkillSaved?.(published); setNotice(`“${published.name}”已发布。`); }
+    catch (reason) { setError(String(reason)); }
+    finally { setBusy(false); }
+  };
+
   const send = async () => {
-    if (!input.trim() || busy) return;
+    if (!input.trim() || busy || loading) return;
     setNotice(undefined);
     setStopping(false);
     setAgentPhase(undefined);
@@ -537,84 +735,58 @@ export default function AgentWorkspace({ profile, apiKey, openModels, designTarg
       return;
     }
     if (workspaceMode === "skill") {
+      if (busyRef.current) return;
+      busyRef.current = true;
       setBusy(true);
       setError(undefined);
-      setSkillDesignElapsed(0);
       const userText = input.trim();
-      setInput("");
-      setSkillMessages((current) => [...current, { role: "user", content: userText }]);
+      const messages: SkillDesignState["messages"] = [...skillMessages, { role: "user", content: userText }];
       try {
-        const designId = skillDesignIdRef.current || globalThis.crypto.randomUUID();
+        const session = await ensureSession();
+        const designId = skillDesignIdRef.current || randomId();
         skillDesignIdRef.current = designId;
-        setSkillDesignStatus(skillDraft ? "正在载入现有能力包" : "正在创建能力包设计工作区");
-        setSkillDesignPhase("loading_skill");
-        const handleDesignEvent = (event: SkillDesignEvent) => {
-          if (event.type === "started") {
-            if (event.designId) skillDesignIdRef.current = event.designId;
-            return;
-          }
-          if (event.type === "phase") {
-            setSkillDesignPhase(event.phase);
-            setSkillDesignStatus(event.message);
-            if (Number.isFinite(event.elapsedSeconds)) setSkillDesignElapsed((value) => Math.max(value, event.elapsedSeconds));
-            return;
-          }
-          if (event.type === "test_progress") {
-            setSkillDesignPhase("testing");
-            setSkillDesignStatus(`${event.message}（${event.current}/${event.total}）`);
-            return;
-          }
-          if (event.type === "completed") setSkillDesignPhase("ready");
-          if (event.type === "cancelled") {
-            setSkillDesignPhase("brief");
-            setSkillDesignStatus("能力包设计已停止");
-          }
-        };
-        const generated = await designAgentTool({
-          designId,
-          sessionId: activeId,
-          currentSkillId: skillDraft?.id,
-          prompt: userText,
-          profileId: profile.id,
-          model: turnModel || profile.defaultModel,
-          apiKey: apiKey || undefined,
-          kind: skillDraft?.source === "builtin"
-            ? "derived"
-            : skillDraft?.kind === "workflow" || skillDraft?.kind === "derived"
-              ? skillDraft.kind
-              : "python",
-          attachments: materials
-            .filter((item) => item.localSnapshotPath)
-            .map((item) => ({
-              path: item.localSnapshotPath!,
-              role: skillAttachmentRoles[item.id] || "sample_input",
-            })),
+        setInput("");
+        if (/^(?:你好(?:呀|啊|吗)?|您好|嗨|哈[啰喽罗囉]|在吗|hello|hi)[\s!！?？。.,，～~]*$/iu.test(userText)) {
+          const content = skillDraft
+            ? `你好！我们可以继续修改“${skillDraft.name}”。你想调整哪条规则，或${needsSamples ? "试一下新的样本" : "修改参数后再测试"}？`
+            : "你好！你想让能力包帮你处理什么材料？可以先描述输入文件和想得到的结果，也可以点“添加样本”给我一个例子。";
+          const conversation: SkillDesignState["messages"] = [...messages, { role: "assistant", content }];
+          setSkillMessages(conversation);
+          await queueDesignSave(session.id, { ...designSnapshot(), designId, messages: conversation });
+          setDesignSessionId(session.id);
+          return;
+        }
+        const runId = randomId();
+        designRunIdRef.current = runId;
+        setSkillMessages(messages);
+        setSkillDesignElapsed(0);
+        setTestResult(undefined);
+        setSkillDesignStatus("正在准备能力包设计");
+        await queueDesignSave(session.id, { ...designSnapshot(), designId, messages, testResult: undefined });
+        setDesignSessionId(session.id);
+        const result = await designAndTestSkill({
+          design: buildDesignRequest(userText, session.id), runId,
+          samplePaths: sampleInputs(), parameters: designParameters, autoTest: true,
         }, handleDesignEvent);
-        const next: AgentTool = {
-          ...generated,
-          version: skillDraft?.version || generated.version || "0.1.0",
-          status: "draft",
-          available: false,
-        };
-        const saved = await saveAgentTool(next);
-        setSkillDraft(saved);
-        setSkillDesignPhase("ready");
-        setSkillMessages((current) => [
-          ...current,
-          {
-            role: "assistant",
-            content: `已生成并保存能力包草稿“${saved.name}”。当前支持 ${saved.supportedExtensions.join("、") || "通用"}，状态为待测试。你可继续说“把异常日期列出来”之类的修改要求，或去能力包库用样本测试。`,
-          },
-        ]);
-        onSkillSaved?.(saved);
-        setSkillDesignStatus(undefined);
+        setSkillDraft(result.skill);
+        setTestResult(result.testResult);
+        setDesignParameters(result.testResult?.parameters || Object.fromEntries(result.skill.parameters.filter(p => p.defaultValue !== undefined).map(p => [p.key, p.defaultValue])));
+        const summary = result.testResult?.summary || `已保存“${result.skill.name}”测试版。${result.skill.supportedExtensions.length ? "添加原始样本和必填参数后即可测试。" : "参数就绪后即可开始测试。"}`;
+        const completed: SkillDesignState["messages"] = [...messages, { role: "assistant", content: summary }];
+        setSkillMessages(completed);
+        await queueDesignSave(session.id, { designId, skillId: result.skill.id, messages: completed, attachmentRoles: skillAttachmentRoles, parameters: result.testResult?.parameters || Object.fromEntries(result.skill.parameters.filter(p => p.defaultValue !== undefined).map(p => [p.key, p.defaultValue])), testResult: result.testResult, sourceTask });
+        await renameAgentSession(session.id, `设计 · ${result.skill.name}`);
+        await refreshSessions(session.id);
+        onSkillSaved?.(result.skill);
       } catch (reason) {
         setError(String(reason));
-        setSkillDesignPhase("brief");
-        setSkillDesignStatus(undefined);
+        setSkillMessages([...messages, { role: "assistant", content: `本轮未完成：${String(reason)}。已保留设计记录，可继续修改。` }]);
       } finally {
+        busyRef.current = false;
         setBusy(false);
         setStopping(false);
+        setSkillDesignStatus(undefined);
+        designRunIdRef.current = undefined;
       }
       return;
     }
@@ -672,23 +844,46 @@ export default function AgentWorkspace({ profile, apiKey, openModels, designTarg
     }
   };
 
-  const saveRunAsSkill = async (run: AgentToolRun) => {
-    if (savedSkillRuns.has(run.id)) return;
+  const saveTaskAsSkill = async (turnId: string) => {
+    if (busyRef.current || !activeId || webMode) return;
+    const originalSession = activeId;
+    busyRef.current = true; setBusy(true); setError(undefined);
     try {
-      const skill = await promoteAgentRunToSkill(run.id, run.toolId === "codex_harness" ? undefined : run.summary);
-      setSavedSkillRuns((current) => new Set(current).add(run.id));
-      setNotice(`已保存为能力包草稿“${skill.name}”，请用新样本测试后发布。`);
-      onSkillSaved?.(skill);
+      const seed = await getTaskSkillSeed(originalSession, turnId);
+      const candidates = detail?.toolRuns.filter(run => run.turnId === turnId && run.status === "completed") || [];
+      const run = candidates.find(run => run.toolId === "codex_harness") || [...candidates].reverse().find(run => run.toolId === "run_python" && !run.detail?.includes("样本结构诊断"));
+      let skill: AgentTool | undefined;
+      let reason = "本轮需要将处理依据整理为可复用规则。";
+      if (run) {
+        try { skill = await promoteAgentRunToSkill(run.id, run.toolId === "codex_harness" ? undefined : run.summary); }
+        catch (failure) { reason = String(failure); }
+      }
+      const created = await createFreshSession("skill", skill);
+      if (!created) return;
+      if (seed.samplePaths.length) {
+        await addAgentAttachments(created.id, seed.samplePaths.map(path => ({ kind: "file", path })), true);
+        await refreshSessions(created.id);
+      }
+      const source = { sessionId: originalSession, turnId };
+      const messages: SkillDesignState["messages"] = [{ role: "assistant", content: skill
+        ? `已从这次成功任务生成“${skill.name}”测试版，并保留执行参数。先用原样本复现，再换样本验证后发布。`
+        : `已建立独立设计会话，带入原任务需求和成功执行记录。${reason} 请补充需要固定的规则，然后发送以生成测试版。${seed.requiresNetwork ? ` ${seed.networkReason}。` : ""}` }];
+      const parameters = Object.fromEntries((skill?.parameters || []).filter(p => p.defaultValue !== undefined).map(p => [p.key, p.defaultValue]));
+      setSourceTask(source); setSourceContext(seed.prompt); setSkillMessages(messages);
+      if (!skill) setInput("把这次成功任务整理为可复用的能力包测试版，保留处理规则，把每次可能变化的内容做成参数。");
+      await queueDesignSave(created.id, { designId: skillDesignIdRef.current!, skillId: skill?.id, messages, attachmentRoles: {}, parameters, sourceTask: source });
+      if (skill) onSkillSaved?.(skill);
+      if (!seed.samplePaths.length) setNotice("原任务没有保存可复用的输入引用，请重新添加测试样本。");
     } catch (reason) {
       setError(String(reason));
-    }
+    } finally { busyRef.current = false; setBusy(false); }
   };
 
   const stop = async () => {
     setStopping(true);
-    if (workspaceMode === "skill" && skillDesignIdRef.current) {
+    if (workspaceMode === "skill" && designRunIdRef.current) {
       try {
-        await cancelSkillDesign(skillDesignIdRef.current);
+        await cancelSkillDesign(designRunIdRef.current!);
       } catch (reason) {
         setStopping(false);
         setError(`无法停止能力设计：${String(reason)}`);
@@ -705,25 +900,34 @@ export default function AgentWorkspace({ profile, apiKey, openModels, designTarg
   };
 
   const deleteSession = async (sessionId: string) => {
+    if (busy || loading) return;
     if (!window.confirm("删除这个会话及材料副本？已导出的成果文件默认保留。"))
       return;
+    setBusy(true);
+    try {
+    await flushDesign();
     await deleteAgentSession(sessionId, false);
     const remaining = sessions.filter((item) => item.id !== sessionId);
     sessionsRef.current = remaining;
     setSessions(remaining);
+    if (sessionId !== activeIdRef.current) return;
+    resetDesign();
     activeIdRef.current = remaining[0]?.id;
     setActiveId(activeIdRef.current);
     setDetail(
       remaining[0] ? await getAgentSession(remaining[0].id) : undefined,
     );
+    if (remaining[0]) await restoreDesign(remaining[0].id);
+    } catch (reason) { setError(`删除会话失败：${String(reason)}`); }
+    finally { setBusy(false); }
   };
 
   const renameSession = async (session: AgentSession) => {
     if (busy) return;
     const title = window.prompt("重命名会话", session.title)?.trim();
     if (!title || title === session.title) return;
-    await renameAgentSession(session.id, title);
-    await refreshSessions(session.id);
+    try { await renameAgentSession(session.id, title); await refreshSessions(activeId); }
+    catch (reason) { setError(String(reason)); }
   };
 
   const allArtifacts = useMemo(
@@ -778,6 +982,7 @@ export default function AgentWorkspace({ profile, apiKey, openModels, designTarg
     () => detail?.attachments.filter((item) => item.kind !== "artifact") ?? [],
     [detail?.attachments],
   );
+  const sampleLabels = useMemo(() => Object.fromEntries(materials.flatMap(item => item.localSnapshotPath ? [[item.localSnapshotPath, item.name]] : [])), [materials]);
   const materialGroups = useMemo(() => {
     const groups = new Map<string, AgentAttachment[]>();
     for (const item of materials) {
@@ -833,19 +1038,6 @@ export default function AgentWorkspace({ profile, apiKey, openModels, designTarg
     ];
     return [...new Map(runs.map((run) => [run.id, run])).values()];
   }, [detail?.toolRuns, latestPersistedTurnId, liveRuns]);
-  const reusableRunId = useMemo(
-    () =>
-      allRuns.find((run) => run.toolId === "codex_harness" && run.status === "completed" && run.detail?.includes("可保存工作流"))?.id ||
-      [...allRuns]
-        .reverse()
-        .find(
-          (run) =>
-            run.toolId === "run_python" &&
-            run.status === "completed" &&
-            !run.detail?.includes("样本结构诊断"),
-        )?.id,
-    [allRuns],
-  );
 
   return (
     <div className={`agent-workspace ${contextOpen ? "" : "context-collapsed"}`}>
@@ -855,7 +1047,7 @@ export default function AgentWorkspace({ profile, apiKey, openModels, designTarg
             <span>文件 Agent</span>
             <strong>工作会话</strong>
           </div>
-          <button onClick={createNew} disabled={busy} aria-label="新建会话">
+          <button onClick={createNew} disabled={busy || loading} aria-label={workspaceMode === "skill" ? "新建设计会话" : "新建会话"}>
             <Plus size={17} />
           </button>
         </header>
@@ -923,8 +1115,8 @@ export default function AgentWorkspace({ profile, apiKey, openModels, designTarg
             </label>
           )}
           <div className="agent-work-mode">
-            <button disabled={busy} className={workspaceMode === "files" ? "is-active" : ""} onClick={() => setWorkspaceMode("files")}>{workspaceMode === "skill" && <ArrowLeft size={13} />}处理材料</button>
-            <button disabled={busy} className={workspaceMode === "skill" ? "is-active" : ""} onClick={() => setWorkspaceMode("skill")}><Code size={14} />设计能力包</button>
+            <button disabled={busy || loading} className={workspaceMode === "files" ? "is-active" : ""} onClick={() => void changeMode("files")}>{workspaceMode === "skill" && <ArrowLeft size={13} />}处理材料</button>
+            <button disabled={busy || loading} className={workspaceMode === "skill" ? "is-active" : ""} onClick={() => void changeMode("skill")}><Code size={14} />设计能力包</button>
           </div>
           <button className={profile && (apiKey.trim() || profile.keyStored) ? "model-ready" : ""} onClick={openModels}>
             <Cloud size={15} />
@@ -957,37 +1149,6 @@ export default function AgentWorkspace({ profile, apiKey, openModels, designTarg
           </div>
         )}
         <div className="message-stream" ref={scrollRef}>
-          {workspaceMode === "skill" && (
-            <section className="skill-design-progress" aria-label="能力包设计进度">
-              <div>
-                <span>能力包设计工作台</span>
-                <strong>{skillDraft?.name || "从工作方法创建可复用能力"}</strong>
-                <small>{skillDesignProgress || (skillDraft ? "继续描述要调整的规则，现有能力包会保留版本记录" : "添加样本并说明规则，草稿通过测试后才能发布")}</small>
-              </div>
-              <ol>
-                {[
-                  ["brief", "定义规则"],
-                  ["editing", "生成实现"],
-                  ["testing", "结构校验"],
-                  ["ready", "保存草稿"],
-                ].map(([phase, label], index) => {
-                  const currentIndex = skillDesignPhase === "loading_skill"
-                    ? 1
-                    : skillDesignPhase === "repairing"
-                      ? 2
-                      : skillDesignPhase === "saving"
-                        ? 3
-                      : ["brief", "editing", "testing", "ready"].indexOf(skillDesignPhase);
-                  return (
-                    <li className={index < currentIndex ? "is-done" : index === currentIndex ? "is-current" : ""} key={phase}>
-                      <i>{index < currentIndex ? <CheckCircle size={13} weight="fill" /> : index + 1}</i>
-                      <span>{label}</span>
-                    </li>
-                  );
-                })}
-              </ol>
-            </section>
-          )}
           {workspaceMode === "skill" && skillMessages.length === 0 && !busy && (
             <div className="agent-welcome skill-welcome">
               <span className="welcome-mark"><Code size={25} /></span>
@@ -998,7 +1159,7 @@ export default function AgentWorkspace({ profile, apiKey, openModels, designTarg
                 <li><span><Code size={15} /></span><b>2. 说清规则</b><small>输入是什么、如何处理、输出什么、哪些内容不能改</small></li>
                 <li><span><CheckCircle size={15} /></span><b>3. 测试发布</b><small>先在副本上验收；通过后才进入能力包库</small></li>
               </ol>
-              <div><button onClick={addFiles}><File size={16} />添加样本</button><button onClick={addFolder}><FolderOpen size={16} />添加参考文件夹</button></div>
+              <div><button onClick={() => void addFiles()}><File size={16} />添加样本</button><button onClick={() => void addFolder(true)}><FolderOpen size={16} />添加参考文件夹</button></div>
               <div className="skill-starters">
                 <button onClick={() => setInput("设计一个批量信息提取能力包：从每份材料中提取姓名、单位、现职务和任职时间，汇总成一个 Excel。遇到缺失字段要留空并生成错误清单，原文件不修改。")}>信息提取汇总</button>
                 <button onClick={() => setInput("设计一个公文格式能力包：以我提供的正确成果为版式标准，批量处理 DOC 和 DOCX，保留正文、表格和图片，生成新的 DOCX，并报告缺失字体和无法处理的文件。")}>公文套版</button>
@@ -1028,6 +1189,11 @@ export default function AgentWorkspace({ profile, apiKey, openModels, designTarg
                       ))}
                     </div>
                   ))}
+                  {!webMode && message.role === "assistant" && message.turnId && artifactsForMessage(message, detail.messages, artifactGroups).length > 0 && (
+                    <button className="task-to-skill" disabled={busy || loading} onClick={() => void saveTaskAsSkill(message.turnId!)}>
+                      <FloppyDisk size={15} />生成能力包测试版
+                    </button>
+                  )}
                   <small>{displayTime(message.createdAt)}</small>
                 </div>
               </article>
@@ -1038,6 +1204,13 @@ export default function AgentWorkspace({ profile, apiKey, openModels, designTarg
               <div>{message.role === "assistant" ? <MarkdownMessage>{message.content}</MarkdownMessage> : <p>{message.content}</p>}</div>
             </article>
           ))}
+          {workspaceMode === "skill" && sourceTask && <p className="design-source-note">来自已交付任务 · <button disabled={busy} onClick={() => void chooseSession(sourceTask.sessionId)}>查看原会话</button> · 设计记录与原会话独立保存</p>}
+          {workspaceMode === "skill" && skillDraft && skillDraft.source === "designed" && (
+            <SkillTestPanel skill={skillDraft} paths={sampleInputs()} sampleLabels={sampleLabels} parameters={designParameters} result={testResult} busy={busy}
+              onParameter={(key, value) => { setDesignParameters(current => ({ ...current, [key]: value })); setTestResult(undefined); }}
+              onAdd={() => void addFiles(true)} onTest={() => void testCurrentDesign()} onRepair={webMode ? undefined : () => void testCurrentDesign(true)}
+              onOpen={path => void revealInFinder(path).catch(reason => setError(String(reason)))} onPublish={() => void publishCurrentDesign()} />
+          )}
           {workspaceMode === "files" && allRuns.length > 0 && (
             <details className="tool-activity" open={showProcess} onToggle={(event) => setShowProcess(event.currentTarget.open)}>
               <summary>本轮过程 · {allRuns.length} 步 <span>{showProcess ? "收起" : "展开"}</span></summary>
@@ -1057,11 +1230,6 @@ export default function AgentWorkspace({ profile, apiKey, openModels, designTarg
                   <span className="tool-kind" title={`内部工具：${run.toolId}`}>
                     {toolLabel(run.toolId)}
                   </span>
-                  {run.id === reusableRunId && artifacts.length > 0 && (
-                    <button className="promote-skill" disabled={savedSkillRuns.has(run.id)} onClick={() => saveRunAsSkill(run)}>
-                      <FloppyDisk size={12} />{savedSkillRuns.has(run.id) ? "已保存" : "保存为能力包"}
-                    </button>
-                  )}
                 </div>
               ))}
             </details>
@@ -1110,7 +1278,7 @@ export default function AgentWorkspace({ profile, apiKey, openModels, designTarg
                   {group.kind === "folder" ? <FolderOpen size={13} /> : iconForAttachment(group.items[0])}
                   <b>{group.name}</b>
                   {group.items.length > 1 && <i>{group.items.length}</i>}
-                  <button onClick={() => removeMaterialGroup(group)}>
+                  <button disabled={busy} onClick={() => removeMaterialGroup(group)}>
                     <X size={11} />
                   </button>
                 </span>
@@ -1121,17 +1289,17 @@ export default function AgentWorkspace({ profile, apiKey, openModels, designTarg
             <div className="skill-material-roles">
               <span>告诉 Agent 每份材料的用途</span>
               <div>
-                {materials.slice(-6).map((item) => (
+                {materials.map((item) => (
                   <label key={item.id} title={item.name}>
                     <b>{item.name}</b>
-                    <select
-                      value={skillAttachmentRoles[item.id] || "sample_input"}
-                      onChange={(event) => setSkillAttachmentRoles((current) => ({
+                    <select disabled={busy}
+                      value={attachmentRole(item)}
+                      onChange={(event) => { setTestResult(undefined); setSkillAttachmentRoles((current) => ({
                         ...current,
                         [item.id]: event.target.value as DesignAttachment["role"],
-                      }))}
+                      })); }}
                     >
-                      <option value="sample_input">原始样本</option>
+                      {needsSamples && <option value="sample_input">原始样本</option>}
                       <option value="expected_output">正确成果</option>
                       <option value="template">模板</option>
                       <option value="reference">参考材料</option>
@@ -1143,10 +1311,10 @@ export default function AgentWorkspace({ profile, apiKey, openModels, designTarg
           )}
           <div className="composer">
             <div className="attach-menu">
-              <button onClick={addFiles} title="添加文件">
-                <Paperclip size={17} />
+              <button disabled={busy} onClick={() => void addFiles()} title="添加文件">
+                <Paperclip size={17} />{workspaceMode === "skill" && <span>{needsSamples ? "添加样本" : "添加参考材料"}</span>}
               </button>
-              <button onClick={addFolder} title="添加文件夹">
+              <button disabled={busy} onClick={() => void addFolder()} title="添加文件夹">
                 <FolderOpen size={17} />
               </button>
               <button
@@ -1160,6 +1328,7 @@ export default function AgentWorkspace({ profile, apiKey, openModels, designTarg
               value={input}
               onChange={(event) => setInput(event.target.value)}
               onKeyDown={(event) => {
+                if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
                 if (event.key === "Enter" && !event.shiftKey) {
                   event.preventDefault();
                   send();
@@ -1183,7 +1352,7 @@ export default function AgentWorkspace({ profile, apiKey, openModels, designTarg
               <button
                 className="send-button"
                 aria-label="发送消息"
-                disabled={!input.trim()}
+                disabled={!input.trim() || loading}
                 onClick={send}
               >
                 <ArrowUp size={16} weight="bold" />

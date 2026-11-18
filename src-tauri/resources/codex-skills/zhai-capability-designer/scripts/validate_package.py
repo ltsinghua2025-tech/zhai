@@ -130,6 +130,20 @@ def main() -> None:
     cases_path = root / "tests" / "cases.json"
     if cases_path.exists() and not isinstance(load_json(cases_path), list):
         fail("tests/cases.json must contain an array")
+    rules_path = root / "references" / "parameter-rules.json"
+    if rules_path.exists():
+        rules = load_json(rules_path)
+        if not isinstance(rules, dict) or set(rules) - {"atLeastOnePositive"}:
+            fail("unsupported parameter rule")
+        numeric_keys = {key for key, value in schema.get("properties", {}).items()
+                        if isinstance(value, dict) and value.get("type") in {"number", "integer"}}
+        numeric_keys.update(p["key"] for p in parameters if p["type"] == "number")
+        groups = rules.get("atLeastOnePositive", [])
+        if not isinstance(groups, list):
+            fail("atLeastOnePositive must be an array of field groups")
+        for group in groups:
+            if not isinstance(group, list) or not group or any(not isinstance(key, str) or key not in numeric_keys for key in group):
+                fail("positive parameter groups must reference declared numeric fields")
     print(json.dumps({"valid": True, "skillId": contract["id"], "status": contract["status"]}, ensure_ascii=False))
 
 

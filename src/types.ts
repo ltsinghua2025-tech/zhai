@@ -451,6 +451,44 @@ export type DesignAttachment = {
   role: "sample_input" | "template" | "expected_output" | "reference";
 };
 
+export type SkillTestResult = {
+  status: "passed" | "failed" | "needs_input" | "cancelled";
+  summary: string;
+  outputDirectory?: string;
+  outputs: string[];
+  parameters: Record<string, unknown>;
+  repairable: boolean;
+};
+
+export type SkillDesignState = {
+  designId: string;
+  skillId?: string;
+  messages: Array<{ role: "user" | "assistant"; content: string }>;
+  attachmentRoles: Record<string, DesignAttachment["role"]>;
+  parameters: Record<string, unknown>;
+  testResult?: SkillTestResult;
+  sourceTask?: { sessionId: string; turnId: string };
+};
+
+export type TaskSkillSeed = { prompt: string; samplePaths: string[]; requiresNetwork: boolean; networkReason?: string };
+
+export type SkillDesignRunResult = { skill: AgentTool; testResult?: SkillTestResult };
+export type DesignAndTestRequest = {
+  design: DesignToolRequest;
+  samplePaths: string[];
+  parameters: Record<string, unknown>;
+  runId: string;
+  autoTest: boolean;
+};
+export type TestAndRepairRequest = {
+  designId?: string;
+  runId: string;
+  skillId: string;
+  samplePaths: string[];
+  parameters: Record<string, unknown>;
+  repair?: DesignToolRequest;
+};
+
 export type CitizenReplyMode = "reply" | "special" | "appeal" | "review";
 export type CitizenReplyPlatform = "general" | "people" | "provincial";
 

@@ -117,22 +117,30 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .agent-notice span { flex: 1; }
 .agent-notice button { display: grid; place-items: center; padding: 3px; color: inherit; background: transparent; border: 0; }
 .message-stream { flex: 1; min-height: 0; padding: 22px max(20px,calc((100% - 650px)/2)); overflow: auto; scroll-behavior: smooth; }
-.skill-design-progress { display: grid; grid-template-columns: minmax(0,.9fr) minmax(0,1.1fr); align-items: center; gap: 20px; max-width: 100%; padding: 18px 22px; margin-bottom: 24px; overflow: hidden; background: #fff; border: 1px solid #d9e7f1; border-radius: 12px; box-shadow: 0 16px 38px -28px rgba(38,86,126,.18); }
-.skill-design-progress > div, .skill-design-progress ol { min-width: 0; }
-.skill-design-progress > div span, .skill-design-progress > div strong, .skill-design-progress > div small { display: block; }
-.skill-design-progress > div span { color: #3f7eae; font-size: 9.4px; font-weight: 720; letter-spacing: .1em; }
-.skill-design-progress > div strong { margin-top: 4px; color: #3f352e; font-size: 15.5px; font-weight: 690; }
-.skill-design-progress > div small { max-width: 52ch; margin-top: 5px; color: #8a817a; font-size: 10.2px; line-height: 1.5; }
-.skill-design-progress ol { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); padding: 0; margin: 0; list-style: none; }
-.skill-design-progress li { position: relative; display: grid; justify-items: center; gap: 6px; color: #91a0ae; font-size: 9.5px; font-weight: 610; }
-.skill-design-progress li::before { position: absolute; top: 12px; right: 50%; left: -50%; height: 1px; content: ""; background: #dce7f0; }
-.skill-design-progress li:first-child::before { display: none; }
-.skill-design-progress li i { position: relative; z-index: 1; display: grid; width: 25px; height: 25px; place-items: center; color: #8192a1; font-family: "Geist Mono", monospace; font-size: 9px; font-style: normal; background: #f3f0ec; border: 1px solid #e2dcd5; border-radius: 50%; }
-.skill-design-progress li.is-current { color: #2f6fa7; }
-.skill-design-progress li.is-current i { color: #f5fbff; background: #559bd1; border-color: #559bd1; box-shadow: 0 0 0 4px #e3f0fa; }
-.skill-design-progress li.is-done { color: #587089; }
-.skill-design-progress li.is-done::before { background: #91bce0; }
-.skill-design-progress li.is-done i { color: #3f7fac; background: #e4f1fa; border-color: #b9d6ea; }
+.design-test-panel { padding: 16px; margin: 18px 0; background: #fff; border: 1px solid #d9e7f1; border-radius: 10px; font-size: 12px; }
+.design-test-panel header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.design-test-panel header span, .design-test-panel > p { color: #617285; font-size: 11px; line-height: 1.6; }
+.design-test-panel button, .task-promote-button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 32px; padding: 6px 10px; border: 1px solid #c9dceb; border-radius: 6px; background: #f5faff; color: #326b96; font-size: 11px; }
+.design-test-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.test-samples { padding-left: 20px; max-height: 100px; overflow: auto; color: #53657a; overflow-wrap: anywhere; }
+.test-parameters { margin-top: 12px; }
+.test-parameters summary { cursor: pointer; margin-bottom: 10px; }
+.test-parameters fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.design-test-panel .test-input-problem, .test-result.failed, .test-result.needs_input { color: #9c493c; background: #fff6f3; padding: 10px; border-radius: 6px; }
+.skill-parameter-field [aria-invalid="true"] { border-color: #b75b4d; }
+.test-result { margin-top: 12px; overflow-wrap: anywhere; }
+.test-result p { white-space: pre-wrap; line-height: 1.6; }
+.test-result.passed { color: #32755d; }
+.test-result small { display: block; margin-top: 8px; line-height: 1.6; }
+.skill-detail > .design-test-panel, .skill-detail-feedback { width: min(1180px,calc(100% - 64px)); margin: 16px auto; }
+.attach-menu button span { font-size: 11px; white-space: nowrap; }
+.composer .attach-menu button { width: auto; min-width: 29px; gap: 4px; }
+.task-to-skill { display: flex; align-items: center; gap: 6px; padding: 8px 11px; margin-top: 12px; color: #2f6fa7; background: #eef6fc; border: 1px solid #cfe1ef; border-radius: 7px; font-size: 12px; }
+.design-source-note { color: var(--muted); font-size: 11px; }
+.design-source-note button { color: var(--green-dark); background: transparent; border: 0; }
+.test-samples li { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.test-samples li span { overflow-wrap: anywhere; }
+.test-samples li button { flex-shrink: 0; padding: 3px; }
 .agent-welcome { display: grid; min-height: 100%; place-items: center; align-content: center; text-align: center; }
 .welcome-mark { display: grid; width: 48px; height: 48px; place-items: center; color: #f2f9fd; background: linear-gradient(145deg,#6bb0dd,#2f6fa7); border-radius: 14px; box-shadow: 0 12px 28px rgba(47,111,167,.18); }
 .agent-welcome p { margin: 15px 0 5px; color: #37423a; font-size: 16.2px; font-weight: 670; }
@@ -223,7 +231,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .skill-design-workspace .skill-material-roles > span { font-size: 10.2px; }
 
 @container (max-width: 720px) {
-  .skill-design-progress { grid-template-columns: 1fr; gap: 16px; }
 }
 .composer { display: grid; grid-template-columns: auto minmax(0,1fr) 31px; align-items: end; gap: 7px; padding: 7px; background: #f8fbfd; border: 1px solid #ccdce8; border-radius: 11px; box-shadow: 0 7px 21px rgba(37,83,118,.06); }
 .composer:focus-within { border-color: #7eb8e0; box-shadow: 0 0 0 3px rgba(85,155,209,.1); }

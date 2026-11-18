@@ -6,7 +6,7 @@ ZHAI 可以批量排版 Word、公文套红、合并 Excel 和处理 PDF。经�
 
 ## 下载与安装
 
-从 [GitHub Releases](https://github.com/ltsinghua2025-tech/zhai/releases) 下载对应系统的安装包。下载页只列已生成的安装包，平台验证范围见该次发布说明。
+从 [最新版本](https://github.com/ltsinghua2025-tech/zhai/releases/latest) 下载对应系统的安装包。平台验证范围见各版发布说明。
 
 | 系统 | 适用范围 | 安装包 |
 | --- | --- | --- |
@@ -14,7 +14,7 @@ ZHAI 可以批量排版 Word、公文套红、合并 Excel 和处理 PDF。经�
 | Linux | 银河麒麟 V10 SP1 兼容目标，ARM64，使用 WebKitGTK 4.0 | `.deb` |
 | Windows | Windows 10/11，x64，需 WebView2 | 预览 `.exe`（见发布页） |
 
-将 macOS 镜像中的 `zhai.app` 拖入「应用程序」。此版本使用本地签名，未经 Apple 公证。Linux 可通过 `sudo apt install ./zhai_0.27.1_arm64.deb` 安装，扫描识字需另装同版本 `zhai-ocr`。Windows 预览提供离线能力包和兼容接口执行，完整 Codex Harness 与临时 Python 脚本在 Windows 上不可用。
+将 macOS 镜像中的 `zhai.app` 拖入「应用程序」。此版本使用本地签名，未经 Apple 公证。银河麒麟 V10 SP1 ARM64 安装包使用 `sudo apt install ./zhai_0.28.2_arm64.deb` 安装；需要扫描识字时同时指定 `./zhai-ocr_0.28.2_arm64.deb`。Windows 预览提供离线能力包和兼容接口执行，完整 Codex Harness 与临时 Python 脚本在 Windows 上不可用。
 
 ## 配置自己的 API
 

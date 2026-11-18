@@ -168,7 +168,7 @@ impl<'a> ToolSession<'a> {
         // Locator/hash edits deliberately cannot be replayed on different
         // documents without another structure read. Keep an explicit trace.
         memory.records.push(json!({"toolId":"edit_word","parameters":args,"input":"original","runId":run.id,"requiresStructureRead":true}));
-        write_json_atomic(&self.scratch.join("workflow-trace.json"), &json!({"schemaVersion":1,"steps":memory.records}))?;
+        write_json_atomic(&self.scratch.join("workflow-trace.json"), &json!({"schemaVersion":1,"steps":memory.records,"inputIds":self.attachments.iter().filter(|a|a.kind!="artifact").map(|a|a.id.as_str()).collect::<Vec<_>>()}))?;
         memory.successful_calls.insert(signature, result.clone());
         finish_tool_run(self.state, &run.id, "completed", summary)?;
         let _ = self.events.send(AgentEvent::ToolProgress { session_id:self.session.id.clone(), turn_id:self.turn_id.into(), run_id:run.id, progress:100, detail:Some(summary.into()) });
@@ -284,11 +284,13 @@ impl<'a> ToolSession<'a> {
                 });
                 return Err("未生成成果，调查任务请设置 diagnostic=true".into());
             }
+            let mut output_extensions: Vec<_> = paths.iter().filter_map(|p|p.extension().and_then(|v|v.to_str()).map(str::to_lowercase)).collect();
+            output_extensions.sort(); output_extensions.dedup();
             memory.outputs.push(paths);
-            memory.records.push(json!({"tool":tool,"script":script,"parameters":parameters,"input":input,"runId":run.id}));
+            memory.records.push(json!({"tool":tool,"script":script,"parameters":parameters,"input":input,"runId":run.id,"outputExtensions":output_extensions}));
             write_json_atomic(
                 &self.scratch.join("workflow-trace.json"),
-                &json!({"schemaVersion":1,"steps":memory.records}),
+                &json!({"schemaVersion":1,"steps":memory.records,"inputIds":self.attachments.iter().filter(|a|a.kind!="artifact").map(|a|a.id.as_str()).collect::<Vec<_>>()}),
             )?;
             memory.successful_calls.insert(signature, result.clone());
         }
@@ -354,7 +356,7 @@ impl<'a> ToolSession<'a> {
         }
         write_json_atomic(
             &self.scratch.join("workflow-trace.json"),
-            &json!({"schemaVersion":1,"steps":memory.records,"delivery":selector}),
+            &json!({"schemaVersion":1,"steps":memory.records,"delivery":selector,"inputIds":self.attachments.iter().filter(|a|a.kind!="artifact").map(|a|a.id.as_str()).collect::<Vec<_>>()}),
         )?;
         Ok(json!({"success":true,"outputs":delivered}))
     }

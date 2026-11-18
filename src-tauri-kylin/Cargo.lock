@@ -5495,7 +5495,7 @@ dependencies = [
 
 [[package]]
 name = "zhai"
-version = "0.27.1"
+version = "0.28.2"
 dependencies = [
  "chrono",
  "dirs",

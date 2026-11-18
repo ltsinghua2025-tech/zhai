@@ -17,9 +17,18 @@ Work inside the writable capability package supplied by zhai. Treat built-in cap
 5. Prefer a derived composition when the request modifies an existing mature capability. Keep built-in parent capabilities unchanged. First inspect the parent's declared parameters: when the requested change is already supported, create a one-stage derived package that only configures the parent. Do not add a placeholder or pass-through Python stage.
 6. Add `scripts/main.py` only when the requested transformation cannot be expressed by mature capability parameters. Use `python3`; expose `run(context, params)`, open the previous-stage files from `context.inputs`, write new files under `context.output_dir`, and return those new paths in `outputs`.
 7. Add or update `tests/cases.json`. Copy only the fixtures zhai placed in `tests/fixtures/`; never read other paths.
-8. Default to `requiresNetwork: false`. Set it true only when the capability genuinely needs a remote service, and declare the allowed host in permissions.
-9. Run `python3 "$ZHAI_DESIGNER_SKILL/scripts/validate_package.py" .`. This is structural validation only. zhai runs the packaged sidecar when the user selects sample testing; a shell Python interpreter may not have the sidecar's dependencies. Do not invent a test command or claim sample execution passed without running it.
-10. If a test fails, diagnose from the test output, repair once, rerun validation, and stop with the exact unresolved reason if it still fails.
+8. Declare `requiresNetwork` truthfully: deterministic local transformations are offline; workflows that need a model or external service on every reuse are online. Include `network` in permissions and explain the service dependency in the description. The model used to design a package does not itself make that package online. The current custom-script executor denies network access: an online declaration is a preserved draft, not permission to bypass the sandbox or a claim it can run.
+9. Run `python3 "$ZHAI_DESIGNER_SKILL/scripts/validate_package.py" .`. This is structural validation only. zhai saves the draft, then runs selected sample inputs with the packaged production sidecar. A shell Python interpreter may not have the sidecar's dependencies. Do not invent a test command or claim sample execution passed without the executor's result.
+10. When zhai supplies a real sample failure, repair the existing package once using the error and the exact parameters; do not change its ID, discard features, weaken acceptance, or return fabricated artifacts. The application reruns the same sample and parameters. If business input is missing, report that explicitly rather than guessing or editing the implementation to accept invalid input.
+
+## Sample and parameter contract
+
+- Inspect the supplied `tests/fixtures` roles before implementing. `sample_input` files are the actual test inputs; templates, references and expected outputs are resources, not additional data rows. Confirm file formats and headers from the samples; never infer CSV support merely because a filename was attached to an Excel task.
+- Keep the default parameter set executable where a safe default exists. User choices that cannot be inferred must remain required. A zero placeholder is not a valid substitute for a required matrix dimension.
+- Declare cross-field positive-number requirements in `references/parameter-rules.json`, e.g. `{"atLeastOnePositive":[["rows","cols"]]}`. The application checks these before execution and asks for input without spending a model repair attempt. Only reference existing numeric parameter keys.
+- For other business validation use `ValueError("需要补充参数：<specific missing choice>")`. Do not use this prefix for programming defects. Preserve the supplied parameters in repairs.
+- Describe test assertions for content and order, not just file existence. Include a second example with different data when possible. A generated test description is not evidence the test ran.
+- When continuing from a successful task, generalize paths, sample-specific values and runtime settings into `context.inputs` and parameters. Preserve the original task's output contract and distinguish reusable rules from facts only true of the original sample.
 
 ## Design Rules
 

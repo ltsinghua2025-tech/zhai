@@ -1,6 +1,6 @@
 [package]
 name = "material-workshop-desktop"
-version = "0.27.1"
+version = "0.28.2"
 description = "zhai - 可设计和复用的政务文件 Agent"
 authors = ["zhai"]
 edition = "2024"

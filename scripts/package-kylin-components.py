@@ -111,7 +111,7 @@ def main():
         (ocr_stage / "DEBIAN/control").write_text(
             f"Package: zhai-ocr\nVersion: {version}\nArchitecture: arm64\n"
             "Maintainer: zhai\nSection: utils\nPriority: optional\n"
-            "Depends: zhai (>= 0.27.1), zhai (<< 0.28.0), libc6 (>= 2.31), libgcc-s1, libstdc++6\n"
+            f"Depends: zhai (= {version}), libc6 (>= 2.31), libgcc-s1, libstdc++6\n"
             "Description: Optional offline Chinese PDF OCR for zhai\n"
             " Includes fixed local RapidOCR models and an isolated CPU runtime.\n"
             " Install only when scanned PDF text recognition is needed.\n"

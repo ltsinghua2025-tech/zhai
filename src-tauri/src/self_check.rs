@@ -40,17 +40,52 @@ pub(super) fn design(app: &AppHandle, root: &Path) -> Result<Value, String> {
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .map_err(|e| e.to_string())?;
-    let (id, name, url, model): (String, String, String, String) = source.query_row(
-        "SELECT id,display_name,base_url,default_model FROM ai_profiles WHERE provider='deepseek' AND key_stored=1 ORDER BY last_test_success DESC,id LIMIT 1", [],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-    ).map_err(|_| "没有已保存的 DeepSeek 配置")?;
+    let selected=std::env::var("ZHAI_SELF_CHECK_PROFILE_ID").ok();
+    let (id, provider, name, url, model): (String, String, String, String, String) = source.query_row(
+        "SELECT id,provider,display_name,base_url,default_model FROM ai_profiles WHERE key_stored=1 AND ((?1 IS NOT NULL AND id=?1) OR (?1 IS NULL AND provider='deepseek')) ORDER BY last_test_success DESC,id LIMIT 1", params![selected],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?,r.get(4)?)),
+    ).map_err(|_| "没有已保存凭据的指定模型配置")?;
     drop(source);
     let state = AppState::open(root.join("design-data"))?;
-    state.db.lock().execute("INSERT INTO ai_profiles(id,provider,display_name,base_url,default_model,key_stored) VALUES(?1,'deepseek',?2,?3,?4,1)", params![id,name,url,model]).map_err(|e|e.to_string())?;
+    state.db.lock().execute("INSERT INTO ai_profiles(id,provider,display_name,base_url,default_model,key_stored) VALUES(?1,?2,?3,?4,?5,1)", params![id,provider,name,url,model]).map_err(|e|e.to_string())?;
     app.manage(state);
     let state = app.state::<AppState>();
     if std::env::args().any(|a| a == "--self-check-design-resume") {
         return design_resume_check(&state, &id, &model, root, session_key.as_deref());
+    }
+    if std::env::args().any(|a| a == "--self-check-design-matrix") {
+        let sample = root.join("首批.csv");
+        let next = root.join("第二批.csv");
+        fs::write(&sample, "value\n1\n2\n3\n4\n5\n6\n").map_err(|e| e.to_string())?;
+        fs::write(&next, "value\n11\n12\n13\n14\n15\n").map_err(|e| e.to_string())?;
+        let paths = vec![sample.display().to_string()];
+        let spec = DesignToolRequest {
+            design_id: Some("live-matrix".into()), current_skill_id: None,
+            prompt: "创建离线 CSV 数字列转矩阵能力包。读取 CSV 表头 value 下的整数，保持顺序，每行放 cols 个数字（正整数，默认3），末行不足留空。用 openpyxl 写入名为 matrix 的工作表，每个输入对应一个 xlsx。不固定文件名或数值，原件只读。".into(),
+            profile_id: id, model: model.clone(), api_key: session_key, kind: Some("python".into()),
+            attachments: vec![DesignAttachment { path: paths[0].clone(), role: "sample_input".into() }],
+        };
+        let parameters = json!({"cols":3});
+        let generated = tauri::async_runtime::block_on(design_and_test_skill_inner(DesignAndTestRequest {
+            design: spec.clone(), run_id: "matrix-generation".into(), sample_paths: paths.clone(),
+            parameters: parameters.clone(), auto_test: true,
+        }, app, &state, &Events))?;
+        let mut tool = generated.skill;
+        let initial = generated.test_result.ok_or("生成后没有样本测试结果")?;
+        if initial.status != "passed" { return Err(initial.summary); }
+        // Only this synthetic package in the isolated self-check library is modified.
+        let original = tool.source_code.as_deref().ok_or("生成包缺少源码")?;
+        tool.source_code = Some(format!("{original}\n\ndef run(context, params=None):\n    raise RuntimeError('matrix acceptance injected failure')\n"));
+        let broken = save_designed_tool_internal(tool, &state)?;
+        let retest = |run_id: &str, sample_paths, repair| tauri::async_runtime::block_on(test_and_repair_skill_inner(TestAndRepairRequest {
+            run_id: run_id.into(), design_id: Some("live-matrix".into()), skill_id: broken.id.clone(),
+            sample_paths, parameters: parameters.clone(), repair,
+        }, app, &state, &Events))?.test_result.ok_or_else(|| "没有正式测试结果".to_string());
+        let repaired = retest("matrix-repair", paths, Some(spec))?;
+        if repaired.status != "passed" || !repaired.summary.contains("已自动修复一次并重测") { return Err(repaired.summary); }
+        let reused = retest("matrix-reuse", vec![next.display().to_string()], None)?;
+        if reused.status != "passed" { return Err(reused.summary); }
+        return Ok(json!({"root":root,"model":model,"initial":initial,"repaired":repaired,"reuse":reused}));
     }
     let first = root.join("首批Word");
     let second = root.join("换文件夹");
@@ -78,34 +113,24 @@ pub(super) fn design(app: &AppHandle, root: &Path) -> Result<Value, String> {
     let request = DesignToolRequest {
         design_id: Some("word-merge-check".into()), current_skill_id: None,
         prompt: "设计一个可复用的‘文件夹 Word 合并’离线能力：把每次所选文件夹的全部 DOCX 按文件名升序合并成一个 Word，各文件之间分页，保留全文、表格及原有加粗。原件只读。输入支持本次全部材料，不要写死样本名称或路径。普通 DOCX 无页眉页脚；遇到无法保真的复杂结构或旧 DOC 应明确提示，不可悄悄丢掉。完善能力契约、说明和样本验收规则。".into(),
-        profile_id: id, model, api_key: session_key, kind: Some("python".into()),
+        profile_id: id.clone(), model:model.clone(), api_key: session_key, kind: Some("python".into()),
         attachments: vec![DesignAttachment {path:first.to_string_lossy().into(),role:"sample_input".into()}],
     };
     // Re-run the exact package that exposed a runtime failure without asking
     // the model to generate a different implementation that happens to pass.
-    let tool = if let Some(package) = std::env::var_os("ZHAI_SELF_CHECK_DESIGNED_PACKAGE") {
-        load_designed_package(&PathBuf::from(package))?
+    let sample_paths=(1..=3).map(|i| first.join(format!("{i:02}.docx")).to_string_lossy().into()).collect();
+    let tested = if let Some(package) = std::env::var_os("ZHAI_SELF_CHECK_DESIGNED_PACKAGE") {
+        let tool=save_agent_tool(load_designed_package(&PathBuf::from(package))?,app.state())?;
+        if publish_skill(tool.id.clone(),app.state()).is_ok(){return Err("未测试的草稿被发布".into());}
+        tauri::async_runtime::block_on(test_and_repair_skill_inner(TestAndRepairRequest{run_id:"real-package-retest".into(),design_id:None,skill_id:tool.id,sample_paths,parameters:json!({}),repair:None},app,&state,&Events))?
     } else {
-        tauri::async_runtime::block_on(design_agent_tool_inner(request, &state, &Events))?
+        tauri::async_runtime::block_on(design_and_test_skill_inner(DesignAndTestRequest{design:request,run_id:"real-design-and-test".into(),sample_paths,parameters:json!({}),auto_test:true},app,&state,&Events))?
     };
-    let tool = save_agent_tool(tool, app.state())?;
-    if publish_skill(tool.id.clone(), app.state()).is_ok() {
-        return Err("未测试的草稿被发布".into());
+    if tested.skill.test_status.as_deref() != Some("passed") || tested.test_result.as_ref().is_none_or(|test|test.status!="passed") {
+        return Err(format!("实际样本测试失败：{}", tested.skill.availability_detail));
     }
-    let tested = test_skill(
-        TestSkillRequest {
-            skill_id: tool.id.clone(),
-            sample_paths: (1..=3)
-                .map(|i| first.join(format!("{i:02}.docx")).to_string_lossy().into())
-                .collect(),
-            parameters: json!({}),
-        },
-        app.clone(),
-        app.state(),
-    )?;
-    if tested.test_status.as_deref() != Some("passed") {
-        return Err(format!("实际样本测试失败：{}", tested.availability_detail));
-    }
+    let test_outputs=tested.test_result.as_ref().unwrap().outputs.clone();
+    let tool=tested.skill;
     let published = publish_skill(tool.id.clone(), app.state())?;
     let mut outputs = Vec::new();
     for (folder, prefix, count) in [(&first, "首批", 3), (&second, "第二批", 2)] {
@@ -143,7 +168,7 @@ pub(super) fn design(app: &AppHandle, root: &Path) -> Result<Value, String> {
         return Err("原件哈希变化".into());
     }
     Ok(
-        json!({"success":true,"root":root,"skillId":published.id,"packagePath":published.package_path,"reusedPackage":std::env::var_os("ZHAI_SELF_CHECK_DESIGNED_PACKAGE").is_some(),"checks":["真实 DeepSeek 生成能力包（复测时沿用同一包）","未测试禁止发布","正式执行器样本测试","发布能力","首批三份与新文件夹两份独立复用","重新打开核对全文、顺序、表格、加粗与分页","原件哈希不变"],"outputs":outputs}),
+        json!({"success":true,"root":root,"profileId":id,"provider":provider,"model":model,"skillId":published.id,"packagePath":published.package_path,"reusedPackage":std::env::var_os("ZHAI_SELF_CHECK_DESIGNED_PACKAGE").is_some(),"checks":["真实已配置模型生成能力包（复测时沿用同一包）","正式设计与样本测试链路（失败时有限修复）","测试成果保留","发布能力","首批三份与新文件夹两份独立复用","重新打开核对全文、顺序、表格、加粗与分页","原件哈希不变"],"testOutputs":test_outputs,"outputs":outputs}),
     )
 }
 
@@ -280,6 +305,370 @@ fn legacy_staging_check(app: &AppHandle, state: &AppState, source: &Path, root: 
     Ok(())
 }
 
+/// Run the application against a bounded, local model-protocol fixture. The
+/// implementation and resulting files still go through the production engine.
+/// This is deliberately separate from real-model acceptance.
+fn with_design_protocol<T>(
+    state: &AppState,
+    responses: Vec<Value>,
+    action: impl FnOnce(&str) -> Result<T, String>,
+) -> Result<(T, Vec<Value>), String> {
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+    listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+    let address = listener.local_addr().map_err(|e| e.to_string())?;
+    let profile_id = format!("design-protocol-{}", Uuid::new_v4());
+    state.db.lock().execute(
+        "INSERT INTO ai_profiles(id,provider,display_name,base_url,default_model) VALUES(?1,'openai_compatible','隔离设计协议验收',?2,'design-protocol')",
+        params![profile_id, format!("http://{address}")],
+    ).map_err(|e| e.to_string())?;
+    let stop = AtomicBool::new(false);
+    let requests = Mutex::new(Vec::new());
+    std::thread::scope(|scope| {
+        let server = scope.spawn(|| -> Result<(), String> {
+            let deadline = Instant::now();
+            while !stop.load(Ordering::SeqCst) && deadline.elapsed() < Duration::from_secs(90) {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(value) => value,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                        continue;
+                    }
+                    Err(error) => return Err(error.to_string()),
+                };
+                stream.set_nonblocking(false).map_err(|e| e.to_string())?;
+                stream.set_read_timeout(Some(Duration::from_secs(5))).map_err(|e| e.to_string())?;
+                let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).map_err(|e| e.to_string())?;
+                    if line.trim().is_empty() { break; }
+                    if let Some(value) = line.to_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse::<usize>().map_err(|e| e.to_string())?;
+                    }
+                }
+                if length > 2_000_000 { return Err("设计协议请求超出自检限制".into()); }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).map_err(|e| e.to_string())?;
+                let body: Value = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
+                let index = requests.lock().len();
+                requests.lock().push(body);
+                let Some(answer) = responses.get(index) else {
+                    let response = "unexpected extra model request";
+                    write!(stream, "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", response.len(), response).map_err(|e| e.to_string())?;
+                    return Err("设计循环超出预期模型调用次数".into());
+                };
+                let response = json!({"model":"design-protocol","choices":[{"message":{"role":"assistant","content":answer.to_string()}}]}).to_string();
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", response.len(), response).map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        });
+        let result = action(&profile_id);
+        stop.store(true, Ordering::SeqCst);
+        server.join().map_err(|_| "设计协议验收线程失败")??;
+        Ok((result?, requests.lock().clone()))
+    })
+}
+
+fn matrix_design_response(source: &str) -> Value {
+    json!({
+        "name":"隔离验收—列数据转矩阵",
+        "description":"将姓名列重排为两行三列；保留所有数据，原件只读。",
+        "supportedExtensions":["xlsx"], "outputExtensions":["xlsx"],
+        "parameters":[{"key":"cols","label":"矩阵列数","type":"number","required":true,"defaultValue":3,"choices":null,"placeholder":null}],
+        "sourceCode":source,
+        "acceptance":["所有姓名顺序保持","两行三列，末格为空","原件不变"]
+    })
+}
+
+const BROKEN_MATRIX_SOURCE: &str = "def run(context, params):\n    destination = context.output_dir / '矩阵.xlsx'\n    raise RuntimeError('MATRIX_ACCEPTANCE_BROKEN')\n";
+const FIXED_MATRIX_SOURCE: &str = r#"from openpyxl import Workbook, load_workbook
+def run(context, params):
+    book = load_workbook(context.inputs[0], data_only=False)
+    values = [row[0] for row in book.active.iter_rows(min_row=2, values_only=True) if row[0] is not None]
+    cols = int(params['cols'])
+    if cols < 1:
+        raise ValueError('矩阵列数必须大于0')
+    out = Workbook()
+    for index, value in enumerate(values):
+        out.active.cell(index // cols + 1, index % cols + 1, value)
+    path = context.output_dir / '矩阵验收成果.xlsx'
+    out.save(path)
+    book.close()
+    return {'summary':'矩阵处理完成','outputs':[str(path)]}
+"#;
+
+fn design_loopback_request(profile_id: &str, design_id: &str, source: &Path) -> DesignToolRequest {
+    // Deserialize the wire contract so optional fields retain the same defaults
+    // used by the frontend rather than relying on test-only initialization.
+    serde_json::from_value(json!({
+        "designId":design_id,"currentSkillId":null,
+        "prompt":"将Excel姓名列按每行3列重新排成矩阵，所有姓名顺序不变，原件不变。",
+        "profileId":profile_id,"model":"design-protocol",
+        "apiKey":"isolated-not-a-real-key","kind":"python",
+        "attachments":[{"path":source,"role":"sample_input"}]
+    })).expect("self-check design request")
+}
+
+fn check_design_lifecycle(app: &AppHandle, state: &AppState, root: &Path) -> Result<Vec<&'static str>, String> {
+    eprintln!("0.28 设计链路：本地协议模型 + 正式隔离执行器（不是真实云端）");
+    let root = root.join("design-lifecycle");
+    let fixtures = root.join("fixtures");
+    let empty = root.join("empty");
+    fs::create_dir_all(&fixtures).map_err(|e| e.to_string())?;
+    fs::create_dir_all(&empty).map_err(|e| e.to_string())?;
+    let script = root.join("fixtures.py");
+    fs::write(&script, r#"from openpyxl import Workbook
+def run(context, params):
+    paths = []
+    for name, values in [('首批.xlsx', ['甲','乙','丙','丁','戊']), ('换样本.xlsx', ['一','二','三','四'])]:
+        book = Workbook()
+        book.active.append(['姓名'])
+        for value in values:
+            book.active.append([value])
+        path = context.output_dir / name
+        book.save(path)
+        paths.append(str(path))
+    return {'summary':'合成矩阵样本','outputs':paths}
+"#).map_err(|e| e.to_string())?;
+    let request_path = root.join("fixtures-request.json");
+    write_json_atomic(&request_path, &json!({"schemaVersion":1,"neverOverwrite":true,"scriptPath":script,"inputDirectory":empty,"outputDirectory":fixtures,"parameters":{}}))?;
+    let output = engine_command()?.arg("--run-agent-script").arg(&request_path).output().map_err(|e| e.to_string())?;
+    if !output.status.success() { return Err(format!("设计验收样本生成失败：{}", String::from_utf8_lossy(&output.stderr))); }
+    let first = fixtures.join("首批.xlsx");
+    let second = fixtures.join("换样本.xlsx");
+    let csv = fixtures.join("格式不匹配.csv");
+    fs::write(&csv, "姓名\n甲\n乙\n").map_err(|e| e.to_string())?;
+    let hashes = [sha256_file(&first)?, sha256_file(&second)?, sha256_file(&csv)?];
+    let artifact_count = || -> Result<i64, String> {
+        state.db.lock().query_row("SELECT count(*) FROM agent_attachments WHERE kind='artifact'", [], |r| r.get(0)).map_err(|e| e.to_string())
+    };
+    let before_artifacts = artifact_count()?;
+    let (generated, requests) = with_design_protocol(state,
+        vec![matrix_design_response(BROKEN_MATRIX_SOURCE), matrix_design_response(FIXED_MATRIX_SOURCE)],
+        |profile_id| {
+            let request: DesignAndTestRequest = serde_json::from_value(json!({
+                "design":design_loopback_request(profile_id,"matrix-auto-check",&first),
+                "samplePaths":[first],"parameters":{"cols":3},"runId":"matrix-auto-check","autoTest":true
+            })).map_err(|e| e.to_string())?;
+            tauri::async_runtime::block_on(design_and_test_skill_inner(request,app,state,&Events))
+        })?;
+    let tested = generated.test_result.as_ref().ok_or("自动设计没有返回测试结果")?;
+    if generated.skill.test_status.as_deref() != Some("passed") || tested.status != "passed" || tested.outputs.len() != 1 {
+        return Err(format!("失败实现自动修复后仍未通过正式测试：{}",tested.summary));
+    }
+    if requests.len()!=2 || !requests[1].to_string().contains("MATRIX_ACCEPTANCE_BROKEN") || !requests[1].to_string().contains("def run(context") {
+        return Err("自动修复没有获得真实运行错误和原实现，或模型调用次数不正确".into());
+    }
+    let test_outputs = tested.outputs.iter().map(PathBuf::from).collect::<Vec<_>>();
+    verify_matrix_output(state,&root.join("verify-first"),&test_outputs,&["甲","乙","丙","丁","戊"],3)?;
+    if artifact_count()? != before_artifacts { return Err("能力包测试成果混入普通会话成果栏".into()); }
+    let saved = resolve_skill(state,&generated.skill.id)?;
+    if saved.test_status.as_deref()!=Some("passed") { return Err("自动测试通过后状态没有持久保存".into()); }
+    check_design_state_persistence(state,&root,&first,&second,&generated)?;
+
+    // A mismatched sample must be actionable input feedback, not a model call.
+    let ((wrong_format, missing_parameter, cross_field), no_requests) = with_design_protocol(state,vec![],|profile_id| {
+        let mut repair = design_loopback_request(profile_id,"persistent-matrix-a",&first);
+        repair.current_skill_id = Some(saved.id.clone());
+        let request: TestAndRepairRequest = serde_json::from_value(json!({
+            "runId":"matrix-wrong-format","skillId":saved.id,"samplePaths":[csv],"parameters":{"cols":3},"repair":repair
+        })).map_err(|e|e.to_string())?;
+        let wrong = tauri::async_runtime::block_on(test_and_repair_skill_inner(request,app,state,&Events))?;
+        let mut required = saved.clone();
+        required.id = "matrix-required-input-check".into();
+        required.status=Some("draft".into()); required.test_status=Some("untested".into()); required.available=false;
+        required.parameters[0].default_value=None;
+        let required=save_designed_tool_internal(required,state)?;
+        repair.current_skill_id=Some(required.id.clone());
+        repair.design_id=Some("matrix-required-input-design".into());
+        let request: TestAndRepairRequest = serde_json::from_value(json!({
+            "runId":"matrix-missing-parameter","skillId":required.id,"samplePaths":[first],"parameters":{},"repair":repair
+        })).map_err(|e|e.to_string())?;
+        let missing=tauri::async_runtime::block_on(test_and_repair_skill_inner(request,app,state,&Events))?;
+        let mut ruled=required.clone();ruled.id="matrix-cross-field-check".into();
+        ruled.parameters[0].default_value=Some(json!(0));
+        let mut rows=ruled.parameters[0].clone();rows.key="rows".into();rows.label="行数".into();ruled.parameters.push(rows);
+        let ruled=save_designed_tool_internal(ruled,state)?;
+        let rules=PathBuf::from(ruled.package_path.as_deref().ok_or("参数规则测试包缺失")?).join("references/parameter-rules.json");
+        fs::create_dir_all(rules.parent().unwrap()).map_err(|e|e.to_string())?;
+        write_json_atomic(&rules,&json!({"atLeastOnePositive":[["rows","cols"]]}))?;
+        repair.current_skill_id=Some(ruled.id.clone());
+        repair.design_id=Some("matrix-cross-field-design".into());
+        let request:TestAndRepairRequest=serde_json::from_value(json!({"runId":"matrix-cross-field-run","skillId":ruled.id,"samplePaths":[first],"parameters":{},"repair":repair})).map_err(|e|e.to_string())?;
+        let cross_field=tauri::async_runtime::block_on(test_and_repair_skill_inner(request,app,state,&Events))?;
+        if !cross_field.test_result.as_ref().is_some_and(|test|test.summary.contains("至少填写")){return Err("行数列数交叉规则未在执行前给出补充输入提示".into());}
+        Ok((wrong,missing,cross_field))
+    })?;
+    for result in [&wrong_format,&missing_parameter,&cross_field] {
+        let test=result.test_result.as_ref().ok_or("预检未返回可见测试结果")?;
+        if test.status=="passed" || test.repairable || !test.outputs.is_empty() { return Err("格式/参数预检错误被误标成功或触发代码修复".into()); }
+        if publish_skill_inner(result.skill.id.clone(),state).is_ok() { return Err("预检未通过的能力仍被允许发布".into()); }
+    }
+    if !no_requests.is_empty() { return Err("输入预检错误消耗了模型修复调用".into()); }
+    let persisted: String=state.db.lock().query_row("SELECT state_json FROM skill_design_state WHERE design_id='persistent-matrix-a'",[],|row|row.get(0)).map_err(|e|e.to_string())?;
+    let persisted:SkillDesignState=serde_json::from_str(&persisted).map_err(|e|e.to_string())?;
+    if persisted.test_result.as_ref().is_none_or(|r|r.status!="needs_input") || persisted.messages.len()!=2 || persisted.skill_id.as_deref()!=Some(saved.id.as_str()) {return Err("预检失败状态或原设计记录未保留".into());}
+    let sibling:String=state.db.lock().query_row("SELECT state_json FROM skill_design_state WHERE design_id='persistent-matrix-c'",[],|row|row.get(0)).map_err(|e|e.to_string())?;
+    let sibling:SkillDesignState=serde_json::from_str(&sibling).map_err(|e|e.to_string())?;
+    if sibling.parameters!=json!({"cols":7}) || sibling.messages[0].content!="设计C独立规则" || sibling.test_result.is_some(){return Err("同包的不同设计会话串用了测试参数/消息/成果".into());}
+
+    // Re-test after an input error, publish, and execute against unseen input.
+    let request:TestAndRepairRequest=serde_json::from_value(json!({
+        "runId":"matrix-retest","designId":"persistent-matrix-a","skillId":saved.id,"samplePaths":[first],"parameters":{"cols":3},"repair":null
+    })).map_err(|e|e.to_string())?;
+    let retested=tauri::async_runtime::block_on(test_and_repair_skill_inner(request,app,state,&Events))?;
+    if retested.skill.test_status.as_deref()!=Some("passed") { return Err("修正输入后不能重测通过".into()); }
+    let published=publish_skill_inner(saved.id.clone(),state)?;
+    let (_,reused)=execute_skill_pipeline(app,state,&published,std::slice::from_ref(&second),&json!({"cols":2}),Arc::new(AtomicBool::new(false)),&root.join("offline-reuse"),1,&mut HashSet::new())?;
+    verify_matrix_output(state,&root.join("verify-reuse"),&reused,&["一","二","三","四"],2)?;
+    check_design_cancel(app,state,&root,&saved,&first)?;
+    check_design_failure_bounds(app,state,&root,&saved,&first)?;
+    if hashes != [sha256_file(&first)?,sha256_file(&second)?,sha256_file(&csv)?] { return Err("设计测试或复用修改了原件".into()); }
+    write_json_atomic(&root.join("proof.json"),&json!({"kind":"local-protocol-real-executor","skillId":saved.id,"modelRequests":requests.len(),"preflightModelRequests":no_requests.len(),"testOutputs":test_outputs,"reuseOutputs":reused,"originalHashes":hashes,"originalsUnchanged":true,"testArtifactsExcluded":true}))?;
+    Ok(vec!["设计生成、正式样本失败、真实错误回馈、有限自动修复与重测通过（本地协议）","独立设计会话、样本角色、消息、参数和测试成果重开恢复","测试成果独立保留并重开验证矩阵内容与顺序","格式/必填参数预检不调用模型且未通过禁止发布","修正输入重测后发布，换样本离线复用及原件哈希不变","样本执行取消有界退出、不调用修复、不保留半套成果","自动修复一次仍失败时停止，损坏成果与联网自建能力不通过"])
+}
+
+fn check_design_failure_bounds(app:&AppHandle,state:&AppState,root:&Path,prototype:&AgentTool,sample:&Path)->Result<(),String>{
+    let mut network_response=matrix_design_response(FIXED_MATRIX_SOURCE);
+    network_response["requiresNetwork"]=json!(true);network_response["permissions"]=json!(["read_inputs","write_outputs","network"]);
+    let (network_design,network_requests)=with_design_protocol(state,vec![network_response],|profile_id|{
+        let request:DesignAndTestRequest=serde_json::from_value(json!({"design":design_loopback_request(profile_id,"network-declared-check",sample),"samplePaths":[sample],"parameters":{"cols":3},"runId":"network-declared-run","autoTest":true})).map_err(|e|e.to_string())?;
+        tauri::async_runtime::block_on(design_and_test_skill_inner(request,app,state,&Events))
+    })?;
+    if network_requests.len()!=1 || !network_design.skill.requires_network || network_design.test_result.as_ref().is_none_or(|r|r.status!="needs_input" || r.repairable || !r.outputs.is_empty()) || publish_skill_inner(network_design.skill.id,state).is_ok(){return Err("设计协议丢失联网声明或错误执行/修复/发布联网能力".into());}
+    let (failed,requests)=with_design_protocol(state,vec![matrix_design_response(BROKEN_MATRIX_SOURCE),matrix_design_response(BROKEN_MATRIX_SOURCE)],|profile_id|{
+        let request:DesignAndTestRequest=serde_json::from_value(json!({"design":design_loopback_request(profile_id,"matrix-bound-check",sample),"samplePaths":[sample],"parameters":{"cols":3},"runId":"matrix-bound-run","autoTest":true})).map_err(|e|e.to_string())?;
+        tauri::async_runtime::block_on(design_and_test_skill_inner(request,app,state,&Events))
+    })?;
+    let test=failed.test_result.as_ref().ok_or("失败设计没有测试记录")?;
+    if requests.len()!=2 || test.status!="failed" || !test.outputs.is_empty() || publish_skill_inner(failed.skill.id.clone(),state).is_ok(){return Err("自动修复超出一次、伪报通过或允许失败发布".into());}
+    for (id,network,source) in [
+        ("matrix-corrupt-check",false,"def run(context, params):\n    p=context.output_dir / '损坏.xlsx'\n    p.write_text('not a workbook')\n    return {'summary':'声称成功但文件损坏','outputs':[str(p)]}\n"),
+        ("matrix-network-check",true,FIXED_MATRIX_SOURCE),
+    ]{
+        let mut draft=prototype.clone(); draft.id=id.into();draft.status=Some("draft".into());draft.test_status=Some("untested".into());draft.available=false;
+        draft.requires_network=network;draft.permissions.retain(|p|p!="network");if network{draft.permissions.push("network".into());}
+        draft.source_code=Some(source.into());let draft=save_designed_tool_internal(draft,state)?;
+        let request:TestAndRepairRequest=serde_json::from_value(json!({"runId":format!("{id}-run"),"skillId":draft.id,"samplePaths":[sample],"parameters":{"cols":3},"repair":null})).map_err(|e|e.to_string())?;
+        let result=tauri::async_runtime::block_on(test_and_repair_skill_inner(request,app,state,&Events))?;
+        let test=result.test_result.as_ref().ok_or("负向测试结果缺失")?;
+        if test.status=="passed" || !test.outputs.is_empty() || publish_skill_inner(result.skill.id.clone(),state).is_ok(){return Err(format!("{id} 未拒绝错误测试或发布"));}
+        if network && (!result.skill.requires_network || !result.skill.permissions.iter().any(|p|p=="network") || test.repairable){return Err("联网声明丢失或被当作脚本错误修复".into());}
+    }
+    // Synthetic trace metadata checks recursive runtime dependency declarations;
+    // this does not claim that an external service was actually executed.
+    let child=resolve_skill(state,"matrix-network-check")?;
+    let mut wrapper=prototype.clone();wrapper.id="nested-network-check".into();wrapper.kind=Some("workflow".into());wrapper.source_code=None;wrapper.steps.clear();
+    wrapper.requires_network=false;wrapper.permissions.retain(|p|p!="network");
+    wrapper.composition=Some(SkillComposition{schema_version:2,version_policy:"locked".into(),stages:vec![SkillStage::Skill{skill_id:child.id,input:"original".into(),parameters:json!({"cols":3})}]});
+    let mut wrapper=save_designed_tool_internal(wrapper,state)?;
+    if !wrapper.requires_network {return Err("工作流保存丢失子能力联网依赖".into());}
+    wrapper.requires_network=false;wrapper.permissions.retain(|p|p!="network");
+    let session=create_pipeline_session(state,&root.join("network-trace"),&[sample.to_path_buf()])?;
+    insert_agent_message(state,&session.id,"user","网络依赖元数据合成验收",Some("network-metadata-check"))?;
+    let staged=root.join("network-trace-staged.xlsx");
+    fs::copy(sample,&staged).map_err(|e|format!("准备网络元数据验收成果副本失败：{e}"))?;
+    publish_agent_artifacts(state,&session,"合成验收成果",&[staged])?;
+    insert_agent_message(state,&session.id,"assistant","合成记录用于依赖标记测试，不代表已执行外部服务",Some("network-metadata-check"))?;
+    let input_ids=list_session_attachments(state,&session.id)?.into_iter().filter(|a|a.kind!="artifact").map(|a|a.id).collect::<Vec<_>>();
+    let trace=PathBuf::from(&session.workspace_path).join("runs/network-metadata-check/scratch/workflow-trace.json");
+    fs::create_dir_all(trace.parent().unwrap()).map_err(|e|e.to_string())?;
+    write_json_atomic(&trace,&json!({"steps":[{"tool":wrapper,"input":"original","parameters":{}}],"delivery":"previous","inputIds":input_ids}))?;
+    let promoted=workflow::promote(state,&session.id,"network-metadata-check",Some("联网依赖元数据验收"))?;
+    if !promoted.requires_network || !promoted.permissions.iter().any(|p|p=="network") || promoted.available {return Err("沉淀链路未递归保留联网运行依赖".into());}
+    // Simulate an old manifest that incorrectly declared a dependent workflow
+    // offline. Reading the catalog must correct the display without rewriting it.
+    let legacy_root=skill_package_path(state,"nested-network-check")?;
+    let legacy_manifest=legacy_root.join("skill.json");
+    let mut raw:Value=serde_json::from_slice(&fs::read(&legacy_manifest).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
+    raw["requiresNetwork"]=json!(false);raw["permissions"]=json!(["read_inputs","write_outputs"]);raw["status"]=json!("published");raw["testStatus"]=json!("passed");raw["available"]=json!(true);
+    write_json_atomic(&legacy_manifest,&raw)?;
+    let legacy_before=hash_skill_package(&legacy_root)?;
+    if resolve_skill(state,"nested-network-check")?.requires_network {return Err("旧包验收前置条件未保留磁盘显式离线声明".into());}
+    let listed=loaded_skill_catalog(state)?.into_iter().find(|tool|tool.id=="nested-network-check").ok_or("旧联网依赖包未列出")?;
+    let opened=loaded_skill_catalog(state)?.into_iter().find(|tool|tool.id=="nested-network-check").ok_or("旧联网依赖包无法重读")?;
+    if !listed.requires_network || listed.available || !opened.requires_network || opened.available {return Err("旧包显式离线声明掩盖了实际联网依赖".into());}
+    if legacy_before!=hash_skill_package(&legacy_root)? {return Err("读取旧包时写入了能力包文件".into());}
+    write_json_atomic(&root.join("failure-bounds.json"),&json!({"modelRequests":requests.len(),"status":test.status,"unpublished":true,"corruptOutputRejected":true,"networkDependencyRetainedAndBlocked":true,"legacyNetworkCatalogReadOnly":true}))?;
+    Ok(())
+}
+
+fn check_design_state_persistence(state:&AppState,root:&Path,first:&Path,second:&Path,result:&SkillDesignRunResult)->Result<(),String>{
+    let a=create_pipeline_session(state,&root.join("design-session-a"),&[first.to_path_buf()])?;
+    let b=create_pipeline_session(state,&root.join("design-session-b"),&[second.to_path_buf()])?;
+    let c=create_pipeline_session(state,&root.join("design-session-c"),&[second.to_path_buf()])?;
+    let first_attachment=list_session_attachments(state,&a.id)?.into_iter().next().ok_or("设计会话A没有样本")?;
+    let second_attachment=list_session_attachments(state,&b.id)?.into_iter().next().ok_or("设计会话B没有样本")?;
+    let first_state:SkillDesignState=serde_json::from_value(json!({"designId":"persistent-matrix-a","skillId":result.skill.id,"messages":[{"role":"user","content":"设计A的规则"},{"role":"assistant","content":"设计A的反馈"}],"attachmentRoles":{first_attachment.id.clone():"sample_input"},"parameters":{"cols":3},"testResult":result.test_result})).map_err(|e|e.to_string())?;
+    let second_state:SkillDesignState=serde_json::from_value(json!({"designId":"persistent-matrix-b","skillId":null,"messages":[],"attachmentRoles":{second_attachment.id.clone():"reference"},"parameters":{"cols":2},"testResult":null})).map_err(|e|e.to_string())?;
+    save_design_state_inner(state,&a.id,first_state.clone())?;
+    save_design_state_inner(state,&b.id,second_state.clone())?;
+    let sibling:SkillDesignState=serde_json::from_value(json!({"designId":"persistent-matrix-c","skillId":result.skill.id,"messages":[{"role":"user","content":"设计C独立规则"}],"attachmentRoles":{},"parameters":{"cols":7},"testResult":null})).map_err(|e|e.to_string())?;
+    save_design_state_inner(state,&c.id,sibling.clone())?;
+    let reopened=AppState::open(state.data_dir.clone())?;
+    let restored_a=get_design_state_inner(&reopened,&a.id)?.ok_or("设计A无法重开")?;
+    let restored_b=get_design_state_inner(&reopened,&b.id)?.ok_or("设计B无法重开")?;
+    if serde_json::to_value(get_design_state_inner(&reopened,&c.id)?).map_err(|e|e.to_string())? != serde_json::to_value(Some(sibling)).map_err(|e|e.to_string())? {return Err("同包独立设计C无法重开".into());}
+    if serde_json::to_value(&restored_a).map_err(|e|e.to_string())? != serde_json::to_value(&first_state).map_err(|e|e.to_string())? || serde_json::to_value(&restored_b).map_err(|e|e.to_string())? != serde_json::to_value(&second_state).map_err(|e|e.to_string())? {
+        return Err("独立设计会话的草稿、消息、参数、样本角色或测试结果串用/丢失".into());
+    }
+    let mut invalid=first_state;
+    invalid.design_id="../outside".into();
+    if save_design_state_inner(state,&a.id,invalid).is_ok(){return Err("设计ID路径越界未拒绝".into());}
+    Ok(())
+}
+
+struct CancelSampleEvents<'a> {
+    state:&'a AppState,
+    run_id:&'a str,
+    monitor:Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+impl EventSink<SkillDesignEvent> for CancelSampleEvents<'_> {
+    fn send(&self,event:SkillDesignEvent)->Result<(),String>{
+        if matches!(&event,SkillDesignEvent::Phase{phase,..} if phase=="testing") && self.monitor.lock().is_none() {
+            let flag=self.state.skill_design_cancellations.lock().get(self.run_id).cloned().ok_or("测试取消句柄缺失")?;
+            *self.monitor.lock()=Some(std::thread::spawn(move||{std::thread::sleep(Duration::from_millis(750));flag.store(true,Ordering::SeqCst);}));
+        }
+        Ok(())
+    }
+}
+fn check_design_cancel(app:&AppHandle,state:&AppState,root:&Path,prototype:&AgentTool,sample:&Path)->Result<(),String>{
+    let mut slow=prototype.clone();
+    slow.id="matrix-cancel-check".into(); slow.status=Some("draft".into());slow.test_status=Some("untested".into());slow.available=false;
+    slow.source_code=Some("import time\ndef run(context, params):\n    destination=context.output_dir / '不应交付.xlsx'\n    time.sleep(30)\n    raise RuntimeError('取消后不应继续运行')\n".into());
+    let slow=save_designed_tool_internal(slow,state)?;
+    let run_id="matrix-cancel-run";
+    let events=CancelSampleEvents{state,run_id,monitor:Mutex::new(None)};
+    let started=Instant::now();
+    let (cancelled,requests)=with_design_protocol(state,vec![],|profile_id|{
+        let mut repair=design_loopback_request(profile_id,"matrix-cancel-design",sample);
+        repair.current_skill_id=Some(slow.id.clone());
+        let request:TestAndRepairRequest=serde_json::from_value(json!({"runId":run_id,"skillId":slow.id,"samplePaths":[sample],"parameters":{"cols":3},"repair":repair})).map_err(|e|e.to_string())?;
+        tauri::async_runtime::block_on(test_and_repair_skill_inner(request,app,state,&events))
+    })?;
+    if let Some(monitor)=events.monitor.lock().take(){monitor.join().map_err(|_|"取消验收监控失败")?;}
+    let test=cancelled.test_result.as_ref().ok_or("取消测试缺少状态")?;
+    if started.elapsed()>Duration::from_secs(12) || test.status!="cancelled" || !test.outputs.is_empty() || test.repairable || !requests.is_empty() {
+        return Err(format!("样本取消没有有界停止或错误修复/交付：{}",test.summary));
+    }
+    if state.skill_design_cancellations.lock().contains_key(run_id) {return Err("取消后运行锁未清理".into());}
+    if publish_skill_inner(slow.id,state).is_ok(){return Err("已取消的测试仍被允许发布".into());}
+    write_json_atomic(&root.join("cancel-proof.json"),&json!({"status":test.status,"elapsedMs":started.elapsed().as_millis(),"repairModelRequests":requests.len(),"outputs":test.outputs}))?;
+    Ok(())
+}
+
+fn verify_matrix_output(state:&AppState,root:&Path,outputs:&[PathBuf],expected:&[&str],cols:usize)->Result<(),String>{
+    if outputs.len()!=1 || outputs[0].extension().and_then(|s|s.to_str())!=Some("xlsx") { return Err("矩阵测试必须只生成一个 XLSX".into()); }
+    validate_generated_artifact(&outputs[0])?;
+    let session=create_pipeline_session(state,root,outputs)?;
+    execute_dynamic_python_scoped(state,&session,"verify",
+        "from openpyxl import load_workbook\nimport math\ndef run(context, params):\n    book=load_workbook(context.inputs[0],data_only=False)\n    sheet=book.active\n    expected=params['expected']\n    cols=params['cols']\n    assert sheet.max_row==math.ceil(len(expected)/cols), '矩阵行数错误'\n    assert sheet.max_column==cols, '矩阵列数错误'\n    values=[v for row in sheet.iter_rows(values_only=True) for v in row]\n    assert values[:len(expected)]==expected, ('值或顺序错误',values)\n    assert all(v is None for v in values[len(expected):]), '末尾填充错误'\n    book.close()\n    return {'summary':'矩阵尺寸、数值、顺序、补空检查通过','outputs':[]}\n",
+        Some(&json!({"expected":expected,"cols":cols})),Arc::new(AtomicBool::new(false)),None,false,true)?;
+    Ok(())
+}
+
 #[cfg(windows)]
 fn check_windows(app: &AppHandle, state: &AppState, root: &Path, first: &Path, second: &Path) -> Result<Value, String> {
     if python_sandbox::status().available || detect_codex_runtime_internal().available {
@@ -361,6 +750,7 @@ fs::write(&script, "from docx import Document\ndef run(context, params):\n    ou
     )?;
     let attachments = list_session_attachments(&state, &session.id)?;
     let turn = "self-check-turn";
+    insert_agent_message(&state,&session.id,"user","将本轮材料排版并追加核验结语",Some(turn))?;
     let scratch = PathBuf::from(&session.workspace_path)
         .join("runs")
         .join(turn)
@@ -483,17 +873,32 @@ fs::write(&script, "from docx import Document\ndef run(context, params):\n    ou
         return Err("中间成果混入交付目录".into());
     }
     checks.push("仅交付最终成果");
+    let delivered=fs::read_dir(&delivery).map_err(|e|e.to_string())?.map(|e|e.map(|e|e.path())).collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    publish_agent_artifacts(&state,&session,"本轮正式交付",&delivered)?;
+    insert_agent_message(&state,&session.id,"assistant","本轮排版和核验已完成",Some(turn))?;
+    let seed=workflow::task_skill_seed(&state,&session.id,turn)?;
+    if seed["samplePaths"].as_array().is_none_or(|a|a.len()!=1) || !seed["prompt"].as_str().is_some_and(|s|s.contains("将本轮材料排版并追加核验结语") && s.contains("本轮排版和核验已完成")) || seed["requiresNetwork"]!=false {
+        return Err("成功任务测试版种子没有保留当前需求/执行记录/样本或误标联网".into());
+    }
+    if workflow::task_skill_seed(&state,&session.id,"missing-turn").is_ok(){return Err("不存在的任务生成了测试版种子".into());}
+    checks.push("成功任务以本轮需求、实际执行记录和样本生成测试版入口数据");
     let tool = workflow::promote(&state, &session.id, turn, Some("自检办公流程"))?;
     if tool.test_status.as_deref() != Some("untested") || tool.available {
         return Err("新工作流跳过了测试门槛".into());
     }
     checks.push("完整工作流保存为待测试草稿");
+    let test_request:TestAndRepairRequest=serde_json::from_value(json!({"runId":"promoted-workflow-test","skillId":tool.id,"samplePaths":[first],"parameters":{},"repair":null})).map_err(|e|e.to_string())?;
+    let tested=tauri::async_runtime::block_on(test_and_repair_skill_inner(test_request,app,&state,&Events))?;
+    if tested.test_result.as_ref().is_none_or(|r|r.status!="passed"){return Err(format!("任务沉淀后的正式样本测试未通过：{}",serde_json::to_string(&tested.test_result).unwrap_or_default()));}
+    let tool=publish_skill_inner(tool.id,&state)?;
+    let replay_parameters=merge_agent_tool_parameters(&tool.id,&json!({}),std::slice::from_ref(&tool),"");
+    checks.push("成功任务沉淀后经正式样本测试与发布门控");
     let (_summary, outputs) = execute_skill_pipeline(
         app,
         &state,
         &tool,
         std::slice::from_ref(&second),
-        &json!({}),
+        &replay_parameters,
         Arc::new(AtomicBool::new(false)),
         &root.join("replay"),
         1,
@@ -568,6 +973,7 @@ fs::write(&script, "from docx import Document\ndef run(context, params):\n    ou
         "未测试禁止发布，实际测试通过后发布运行",
         "无附件能力从测试到发布和生成Word",
     ]);
+    checks.extend(check_design_lifecycle(app, &state, root)?);
     let redhead = bridge.dispatch("run_skill", json!({"id":"apply_redhead","input":"original","parameters":{"unitName":"测试单位","officeName":"办公室"}}))?;
     if redhead["outputs"].as_array().is_none_or(|v| v.is_empty()) {
         return Err(format!("套红能力没有生成成果：{redhead}"));
@@ -978,12 +1384,13 @@ pub(super) fn online(app: &AppHandle, root: &Path) -> Result<Value, String> {
         &harness.turn_id,
         Some("联网验收排版流程"),
     )?;
+    let replay_parameters=merge_agent_tool_parameters(&workflow.id,&json!({}),std::slice::from_ref(&workflow),"");
     let (_, replay) = execute_skill_pipeline(
         app,
         &state,
         &workflow,
         &[root.join("fixtures/sample1.docx")],
-        &json!({}),
+        &replay_parameters,
         Arc::new(AtomicBool::new(false)),
         &root.join("online-replay"),
         1,

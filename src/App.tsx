@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
 import { openDialog as open, randomId } from "./lib/tauriCompat";
 import {
   ArrowCounterClockwise,
@@ -50,7 +50,8 @@ import {
   saveAgentTool,
   saveAiProfile,
   testAiConnection,
-  testSkill,
+  testAndRepairSkill,
+  cancelSkillDesign,
 } from "./lib/backend";
 import { isWebApiEnabled } from "./lib/webApi";
 import type {
@@ -66,9 +67,12 @@ import type {
   DesignAttachment,
   SkillRunEvent,
   SkillRunResult,
+  SkillTestResult,
 } from "./types";
 import "./App.css";
 import AgentWorkspace from "./AgentWorkspace";
+import { SkillParameterField } from "./SkillParameterField";
+import { SkillTestPanel, missingSkillParameters, skillInputExtensions, skillInputProblem } from "./SkillTestPanel";
 import zhaiAppIcon from "./assets/zhai-app-icon.png";
 
 type View = "agent" | "skills" | "models";
@@ -84,6 +88,21 @@ type BusyState =
   | "testing";
 type SkillKind = "workflow" | "python" | "adapter";
 type ConversationTurn = { role: "user" | "assistant"; content: string };
+
+type SkillLibraryInputs = {
+  paths: string[];
+  parameters: Record<string, unknown>;
+  testResult?: SkillTestResult;
+  needsRetest: boolean;
+};
+
+function defaultSkillLibraryInputs(skill: AgentTool): SkillLibraryInputs {
+  return {
+    paths: [],
+    parameters: Object.fromEntries(skill.parameters.filter(parameter => parameter.defaultValue !== undefined).map(parameter => [parameter.key, parameter.defaultValue])),
+    needsRetest: false,
+  };
+}
 
 const formatChoices = [
   { id: "word", label: "Word/文稿", extensions: ["docx", "doc", "wps", "md", "txt"] },
@@ -119,10 +138,10 @@ function formatBytes(value: number) {
 function getToolCategory(
   tool: AgentTool,
 ): "general" | "word" | "excel" | "pdf" {
-  const extensions = new Set(tool.supportedExtensions);
+  const extensions = new Set(skillInputExtensions(tool));
   const groups = [
     ["word", ["doc", "docx", "wps", "md", "txt"]],
-    ["excel", ["xls", "xlsx"]],
+    ["excel", ["xls", "xlsx", "xlsm"]],
     ["pdf", ["pdf"]],
   ] as const;
   const matched = groups.filter(([, values]) =>
@@ -141,6 +160,7 @@ function App() {
   const [busy, setBusy] = useState<BusyState>("idle");
   const [error, setError] = useState<string>();
   const [designTarget, setDesignTarget] = useState<AgentTool>();
+  const [skillLibraryInputs, setSkillLibraryInputs] = useState(() => new Map<string, SkillLibraryInputs>());
 
   const refreshTools = async () => {
     const items = await listAgentTools();
@@ -211,10 +231,12 @@ function App() {
           hidden={view !== "agent"}
         >
           <AgentWorkspace
+            active={view === "agent"}
             profile={activeProfile}
             apiKey={sessionApiKey}
             openModels={() => setView("models")}
             designTarget={designTarget}
+            onDesignTargetHandled={() => setDesignTarget(undefined)}
             startInDesignMode={Boolean(designTarget)}
             onSkillSaved={() => refreshTools().catch((reason) => setError(String(reason)))}
           />
@@ -230,6 +252,8 @@ function App() {
             setBusy={setBusy}
             setError={setError}
             refreshTools={refreshTools}
+            skillLibraryInputs={skillLibraryInputs}
+            setSkillLibraryInputs={setSkillLibraryInputs}
             onOpenAgent={(tool) => {
               setDesignTarget(tool);
               setView("agent");
@@ -812,6 +836,8 @@ function SkillsWorkspace({
   setBusy,
   setError,
   refreshTools,
+  skillLibraryInputs,
+  setSkillLibraryInputs,
   onOpenAgent,
 }: {
   tools: AgentTool[];
@@ -823,6 +849,8 @@ function SkillsWorkspace({
   setBusy: (value: BusyState) => void;
   setError: (value?: string) => void;
   refreshTools: () => Promise<void>;
+  skillLibraryInputs: Map<string, SkillLibraryInputs>;
+  setSkillLibraryInputs: Dispatch<SetStateAction<Map<string, SkillLibraryInputs>>>;
   onOpenAgent: (tool?: AgentTool) => void;
 }) {
   const [section] = useState<"library" | "builder">("library");
@@ -839,9 +867,17 @@ function SkillsWorkspace({
   const [selectedSkill, setSelectedSkill] = useState<AgentTool>();
   const [deletedSkills, setDeletedSkills] = useState<AgentTool[]>([]);
   const [runEvent, setRunEvent] = useState<SkillRunEvent>();
-  const [runPaths, setRunPaths] = useState<string[]>([]);
-  const [runParameters, setRunParameters] = useState<Record<string, unknown>>({});
+  const selectedInputs = selectedSkill ? skillLibraryInputs.get(selectedSkill.id) || defaultSkillLibraryInputs(selectedSkill) : undefined;
+  const needsFiles = !!selectedSkill?.supportedExtensions.length;
+  const runPaths = needsFiles ? selectedInputs?.paths || [] : [];
+  const runParameters = selectedInputs?.parameters || {};
+  const missingRunParameters = selectedSkill ? missingSkillParameters(selectedSkill, runParameters) : [];
   const [runResult, setRunResult] = useState<SkillRunResult>();
+  const sampleResult = selectedInputs?.testResult;
+  const testInputsChanged = selectedInputs?.needsRetest || false;
+  const [testProgress, setTestProgress] = useState<string>();
+  const selectionVersion = useRef(0);
+  const testingId = useRef<string | undefined>(undefined);
   const [skillQuery, setSkillQuery] = useState("");
   const [recentSkillIds, setRecentSkillIds] = useState<string[]>([]);
   const designed = tools.filter((tool) => tool.source === "designed");
@@ -852,14 +888,20 @@ function SkillsWorkspace({
     listRecentSkills().then(setRecentSkillIds).catch(() => setRecentSkillIds([]));
   }, [tools.length]);
 
+  const closeSkill = () => {
+    selectionVersion.current += 1;
+    setSelectedSkill(undefined);
+  };
+  useEffect(() => () => { selectionVersion.current += 1; }, []);
+
   useEffect(() => {
-    if (!selectedSkill) return;
+    if (!selectedSkill || busy !== "idle") return;
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setSelectedSkill(undefined);
+      if (event.key === "Escape") closeSkill();
     };
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [selectedSkill]);
+  }, [selectedSkill, busy]);
 
   const createDraft = async () => {
     if (!profile) {
@@ -983,99 +1025,110 @@ function SkillsWorkspace({
   };
 
   const openSkill = async (tool: AgentTool) => {
+    if (busy !== "idle") return;
+    const version = ++selectionVersion.current;
     setError(undefined);
+    setNotice(undefined);
     try {
       const skill = await getSkill(tool.id);
+      if (version !== selectionVersion.current) return;
+      updateSkillInputs(skill, current => {
+        const defaults = defaultSkillLibraryInputs(skill);
+        if (skill.source === "builtin" || skill.status === "published") return defaults;
+        const parameters = { ...defaults.parameters };
+        for (const { key } of skill.parameters) {
+          if (Object.prototype.hasOwnProperty.call(current.parameters, key)) parameters[key] = current.parameters[key];
+        }
+        const result = current.testResult?.status === "passed" && skill.testStatus !== "passed" ? undefined : current.testResult;
+        return { ...current, parameters, testResult: result };
+      });
       setSelectedSkill(skill);
-      setRunPaths([]);
       setRunEvent(undefined);
       setRunResult(undefined);
-      setRunParameters(
-        Object.fromEntries(
-          skill.parameters
-            .filter((parameter) => parameter.defaultValue !== undefined)
-            .map((parameter) => [parameter.key, parameter.defaultValue]),
-        ),
-      );
     } catch (reason) {
-      setError(String(reason));
+      if (version === selectionVersion.current) setError(String(reason));
     }
   };
 
-  const addRunFiles = async () => {
-    if (!selectedSkill) return;
-    const selection = await open({
-      directory: false,
-      multiple: true,
-      title: `选择“${selectedSkill.name}”要处理的文件`,
-      filters: selectedSkill.supportedExtensions.length
-        ? [{ name: "支持的文件", extensions: selectedSkill.supportedExtensions }]
-        : undefined,
+  const updateSkillInputs = (skill: AgentTool, update: (value: SkillLibraryInputs) => SkillLibraryInputs) => {
+    setSkillLibraryInputs(current => {
+      const next = new Map(current);
+      next.set(skill.id, update(current.get(skill.id) || defaultSkillLibraryInputs(skill)));
+      return next;
     });
-    const paths = Array.isArray(selection)
-      ? selection
-      : typeof selection === "string"
-        ? [selection]
-        : [];
-    setRunPaths((current) => [...new Set([...current, ...paths])]);
+  };
+
+  const changeSelectedInputs = (update: (value: SkillLibraryInputs) => SkillLibraryInputs) => {
+    if (selectedSkill) updateSkillInputs(selectedSkill, current => ({
+      ...update(current),
+      testResult: undefined,
+      needsRetest: true,
+    }));
+  };
+
+  const addRunFiles = async () => {
+    if (!selectedSkill || !needsFiles) return;
+    const version = selectionVersion.current;
+    try {
+      const selection = await open({
+        directory: false,
+        multiple: true,
+        title: `选择“${selectedSkill.name}”要处理的文件`,
+        filters: [{ name: "支持的文件", extensions: skillInputExtensions(selectedSkill) }],
+      });
+      if (version !== selectionVersion.current || !selection) return;
+      const paths = Array.isArray(selection) ? selection : [selection];
+      updateSkillInputs(selectedSkill, current => {
+        const combined = [...new Set([...current.paths, ...paths])];
+        return combined.length === current.paths.length ? current : { ...current, paths: combined, testResult: undefined, needsRetest: true };
+      });
+      setError(undefined);
+    } catch (reason) {
+      if (version === selectionVersion.current) setError(`添加文件失败：${String(reason)}`);
+    }
   };
 
   const addRedheadTemplate = async () => {
+    const version = selectionVersion.current;
     const selection = await open({ directory: false, multiple: false, title: "选择 Word 红头模板", filters: [{name: "Word 模板", extensions: ["doc", "docx"]}] });
-    if (typeof selection !== "string") return;
-    setRunPaths(current => [...new Set([...current, selection])]);
-    setRunParameters(current => ({...current, templateName: selection.split(/[\\/]/).pop() || ""}));
+    if (version !== selectionVersion.current || typeof selection !== "string") return;
+    changeSelectedInputs(current => ({ ...current, paths: [...new Set([...current.paths, selection])], parameters: { ...current.parameters, templateName: fileName(selection) } }));
   };
 
   const addRunFolder = async () => {
+    const version = selectionVersion.current;
     const selection = await open({
       directory: true,
       multiple: false,
       title: "选择要处理的文件夹",
     });
-    if (typeof selection === "string") {
-      setRunPaths((current) => [...new Set([...current, selection])]);
+    if (version === selectionVersion.current && typeof selection === "string") {
+      changeSelectedInputs(current => ({ ...current, paths: [...new Set([...current.paths, selection])] }));
     }
   };
 
-  const runSkillTest = async () => {
-    if (!selectedSkill) return;
-    const missing = selectedSkill.parameters.find(parameter => parameter.required && (runParameters[parameter.key] == null || String(runParameters[parameter.key]).trim() === ""));
-    if (missing) { setError(`请填写“${missing.label}”`); return; }
-    const selection = selectedSkill.supportedExtensions.length === 0 ? [] : await open({
-      directory: false,
-      multiple: true,
-      title: "选择隔离测试样本",
-    });
-    const paths = Array.isArray(selection)
-      ? selection
-      : typeof selection === "string"
-        ? [selection]
-        : [];
-    if (paths.length === 0 && selectedSkill.supportedExtensions.length > 0) return;
-    setBusy("testing");
-    setError(undefined);
+  const runSkillTest = async (repair = false) => {
+    if (!selectedSkill || busy !== "idle") return;
+    const problem = skillInputProblem(selectedSkill, runPaths, runParameters);
+    if (problem) { setError(problem); return; }
+    if (repair && !profile) { openModels(); return; }
+    const runId = randomId();
+    testingId.current = runId;
+    changeSelectedInputs(current => current);
+    setBusy("testing"); setError(undefined); setTestProgress("正在运行样本测试");
     try {
-      const tested = await testSkill(selectedSkill.id, paths, runParameters);
-      setSelectedSkill(tested);
+      const result = await testAndRepairSkill({ runId, skillId: selectedSkill.id, samplePaths: runPaths, parameters: runParameters,
+        repair: repair && profile ? { designId: `repair-${selectedSkill.id}`, currentSkillId: selectedSkill.id, prompt: "根据真实测试错误修复当前能力包并重测，保留原有规则。", profileId: profile.id, model: profile.defaultModel, apiKey: apiKey || undefined, kind: selectedSkill.kind === "python" ? "python" : "workflow", attachments: runPaths.map(path => ({ path, role: "sample_input" })) } : undefined,
+      }, event => { if (event.type === "phase" || event.type === "test_progress") setTestProgress(event.message); });
+      setSelectedSkill(result.skill);
+      updateSkillInputs(selectedSkill, current => ({ ...current, testResult: result.testResult, needsRetest: result.testResult?.status !== "passed", parameters: result.testResult?.parameters || current.parameters }));
       await refreshTools();
-      if (tested.testStatus === "passed") {
-        setNotice(`“${tested.name}”样本测试通过，可以发布。`);
-      } else {
-        setError(tested.availabilityDetail || "样本测试未通过");
-      }
-    } catch (reason) {
-      setError(String(reason));
-      setSelectedSkill(
-        await getSkill(selectedSkill.id).catch(() => selectedSkill),
-      );
-    } finally {
-      setBusy("idle");
-    }
+    } catch (reason) { setError(String(reason)); }
+    finally { setBusy("idle"); testingId.current = undefined; setTestProgress(undefined); }
   };
 
   const publishSelectedSkill = async () => {
-    if (!selectedSkill) return;
+    if (!selectedSkill || testInputsChanged) return;
     setBusy("saving");
     setError(undefined);
     try {
@@ -1112,14 +1165,9 @@ function SkillsWorkspace({
       setError("请先添加要处理的文件或文件夹");
       return;
     }
-    const missing = selectedSkill.parameters.find(
-      (parameter) =>
-        parameter.required &&
-        (runParameters[parameter.key] === undefined ||
-          runParameters[parameter.key] === ""),
-    );
-    if (missing) {
-      setError(`请填写“${missing.label}”`);
+    const missing = missingSkillParameters(selectedSkill, runParameters);
+    if (missing.length > 0) {
+      setError(`请填写${missing.map(parameter => `“${parameter.label}”`).join("、")}。`);
       return;
     }
     setBusy("running"); setError(undefined); setRunEvent(undefined); setRunResult(undefined);
@@ -1136,7 +1184,12 @@ function SkillsWorkspace({
     setBusy("saving");
     try {
       await deleteSkill(tool.id);
-      if (selectedSkill?.id === tool.id) setSelectedSkill(undefined);
+      if (selectedSkill?.id === tool.id) closeSkill();
+      setSkillLibraryInputs(current => {
+        const next = new Map(current);
+        next.delete(tool.id);
+        return next;
+      });
       await refreshTools();
       setDeletedSkills(await listDeletedSkills());
       setNotice("能力包已移入回收站，可随时恢复。");
@@ -1291,12 +1344,18 @@ function SkillsWorkspace({
                 </div>
                 <button
                   aria-label="关闭能力包详情"
-                  onClick={() => setSelectedSkill(undefined)}
+                  onClick={closeSkill}
+                  disabled={busy !== "idle"}
                 >
                   <ArrowLeft size={15} />
                   返回能力包库
                 </button>
               </header>
+              <div className="skill-detail-feedback" aria-live="polite">
+                {error && <InlineMessage tone="error">{error}</InlineMessage>}
+                {notice && <InlineMessage tone="success">{notice}</InlineMessage>}
+                {testProgress && <p>{testProgress} <button onClick={() => testingId.current && cancelSkillDesign(testingId.current).catch(reason => setError(String(reason)))}>停止测试</button></p>}
+              </div>
               <div className="skill-detail-grid">
                 <div>
                   <small>状态</small>
@@ -1319,7 +1378,7 @@ function SkillsWorkspace({
                 <div>
                   <small>接受材料</small>
                   <strong>
-                    {selectedSkill.supportedExtensions.join("、") || "综合"}
+                    {selectedSkill.supportedExtensions.join("、") || "无需原始材料"}
                   </strong>
                 </div>
               </div>
@@ -1341,13 +1400,12 @@ function SkillsWorkspace({
               <p className="skill-detail-note">
                 {selectedSkill.availabilityDetail}
               </p>
-              {selectedSkill.source === "designed" && selectedSkill.status !== "published" && selectedSkill.parameters.length > 0 && (
-                <div className="skill-parameters">
-                  <header><strong>测试参数</strong><small>使用这些参数运行样本，必填项需要填写</small></header>
-                  <div className="skill-parameter-grid">
-                    {selectedSkill.parameters.map(parameter => <SkillParameterField key={parameter.key} parameter={parameter} value={runParameters[parameter.key]} onChange={value => setRunParameters(current => ({...current, [parameter.key]:value}))} />)}
-                  </div>
-                </div>
+              {selectedSkill.source === "designed" && selectedSkill.status !== "published" && (
+                <SkillTestPanel skill={selectedSkill} paths={runPaths} parameters={runParameters} result={sampleResult} busy={busy !== "idle"}
+                  onParameter={(key, value) => changeSelectedInputs(current => ({ ...current, parameters: { ...current.parameters, [key]: value } }))}
+                  onAdd={() => void addRunFiles()} onTest={() => void runSkillTest()}
+                  onRemove={path => changeSelectedInputs(current => ({ ...current, paths: current.paths.filter(item => item !== path) }))}
+                  onRepair={isWebApiEnabled() ? undefined : () => void runSkillTest(true)} onOpen={path => void revealInFinder(path).catch(reason => setError(String(reason)))} />
               )}
               {selectedSkill.available &&
                 (selectedSkill.status ?? "published") === "published" && (
@@ -1358,7 +1416,7 @@ function SkillsWorkspace({
                     openModels={openModels}
                     embedded
                   />
-                ) : selectedSkill.permissions?.includes("network") ? (
+                ) : (selectedSkill.requiresNetwork || selectedSkill.permissions?.includes("network")) ? (
                   <section className="skill-online-guide">
                     <Cloud size={19} />
                     <div>
@@ -1369,6 +1427,7 @@ function SkillsWorkspace({
                   </section>
                 ) : (
                   <section className="skill-runner">
+                    {needsFiles && <>
                     <header>
                       <div><span>01</span><strong>添加材料</strong></div>
                       <small>只会纳入 {selectedSkill.supportedExtensions.map((item) => item.toUpperCase()).join("、") || "该能力包支持的"} 文件</small>
@@ -1385,18 +1444,19 @@ function SkillsWorkspace({
                           <div key={path}>
                             <File size={14} />
                             <span title={path}>{path.split(/[\\/]/).pop() || path}<small>{path}</small></span>
-                            <button aria-label={`移除 ${path}`} onClick={() => setRunPaths((current) => current.filter((item) => item !== path))}><X size={13} /></button>
+                            <button aria-label={`移除 ${path}`} onClick={() => changeSelectedInputs(current => ({ ...current, paths: current.paths.filter(item => item !== path) }))}><X size={13} /></button>
                           </div>
                         ))}
                       </div>
                     ) : (
                       <div className="skill-run-empty">尚未添加材料，原件不会被覆盖</div>
                     )}
+                    </>}
                     {selectedSkill.parameters.length > 0 && (
                       <div className="skill-parameters">
                         <header>
-                          <span>02</span>
-                          <strong>可选设置</strong>
+                          <span>{needsFiles ? "02" : "01"}</span>
+                          <strong>{selectedSkill.parameters.some(parameter => parameter.required) ? "运行参数" : "可选设置"}</strong>
                           <small>不修改的项目自动采用能力包默认值</small>
                         </header>
                         <div className="skill-parameter-grid">
@@ -1405,7 +1465,8 @@ function SkillsWorkspace({
                               key={parameter.key}
                               parameter={parameter}
                               value={runParameters[parameter.key]}
-                              onChange={(value) => setRunParameters((current) => ({ ...current, [parameter.key]: value }))}
+                              invalid={missingRunParameters.includes(parameter)}
+                              onChange={(value) => changeSelectedInputs(current => ({ ...current, parameters: { ...current.parameters, [parameter.key]: value } }))}
                             />
                           ))}
                         </div>
@@ -1413,7 +1474,7 @@ function SkillsWorkspace({
                     )}
                     <footer>
                       <span>成果将生成新版本，并集中放入本次能力包运行目录。</span>
-                      <button className="primary-action" onClick={runSelectedSkill} disabled={busy !== "idle" || (runPaths.length === 0 && selectedSkill.supportedExtensions.length > 0)}>
+                      <button className="primary-action" onClick={runSelectedSkill} disabled={busy !== "idle" || (runPaths.length === 0 && needsFiles)}>
                         {busy === "running" ? <SpinnerGap className="spin" size={15} /> : <Play size={15} />}
                         {busy === "running" ? "正在处理" : "开始运行"}
                       </button>
@@ -1446,26 +1507,14 @@ function SkillsWorkspace({
                       >
                         停用
                       </button>
-                    ) : (
-                      <button
-                        className="secondary-action"
-                        onClick={runSkillTest}
-                        disabled={busy !== "idle"}
-                      >
-                        {busy === "testing" ? (
-                          <SpinnerGap className="spin" size={15} />
-                        ) : (
-                          <Play size={15} />
-                        )}
-                        {selectedSkill.supportedExtensions.length === 0 ? "测试生成文件" : "选择样本测试"}
-                      </button>
-                    )}
+                    ) : null}
                     <button
                       className="primary-action"
                       onClick={publishSelectedSkill}
                       disabled={
                         busy !== "idle" ||
                         selectedSkill.testStatus !== "passed" ||
+                        testInputsChanged ||
                         selectedSkill.status === "published"
                       }
                     >
@@ -1706,64 +1755,6 @@ function SkillsWorkspace({
   );
 }
 
-function SkillParameterField({
-  parameter,
-  value,
-  onChange,
-}: {
-  parameter: ToolParameter;
-  value: unknown;
-  onChange: (value: unknown) => void;
-}) {
-  const choiceLabel = (choice: string) =>
-    ({
-      general: "12345热线",
-      people: "人民网留言",
-      provincial: "粤省心/省热线",
-      reply: "起草回复",
-      special: "专项答复",
-      appeal: "满意度申诉",
-      review: "审核改写",
-      auto: parameter.key === "recipientMode" ? "自动（保守识别）" : "自动",
-      none: "无主送（不添加）",
-      preserve: "保留原落款布局",
-      unsigned: "无章单一机关（补足间隔）",
-      "utf-8-sig": "UTF-8（兼容 Excel）",
-      "utf-8": "UTF-8",
-      gb18030: "GB18030",
-    } as Record<string, string>)[choice] || choice;
-
-  if (parameter.type === "boolean") {
-    return (
-      <label className="skill-boolean-field">
-        <input
-          type="checkbox"
-          checked={Boolean(value)}
-          onChange={(event) => onChange(event.target.checked)}
-        />
-        <span><strong>{parameter.label}</strong><small>{parameter.required ? "必选" : "可选"}</small></span>
-      </label>
-    );
-  }
-  return (
-    <label className="skill-parameter-field">
-      <span>{parameter.label}{parameter.required && <b>必填</b>}</span>
-      {parameter.type === "choice" ? (
-        <select value={String(value ?? "")} onChange={(event) => onChange(event.target.value)}>
-          <option value="">请选择</option>
-          {(parameter.choices || []).map((choice) => <option key={choice} value={choice}>{choiceLabel(choice)}</option>)}
-        </select>
-      ) : (
-        <input
-          type={parameter.type === "number" ? "number" : "text"}
-          value={String(value ?? "")}
-          placeholder={parameter.placeholder}
-          onChange={(event) => onChange(parameter.type === "number" && event.target.value !== "" ? Number(event.target.value) : event.target.value)}
-        />
-      )}
-    </label>
-  );
-}
 
 function skillStatusLabel(tool: AgentTool) {
   const status = tool.status || (tool.available ? "published" : "unavailable");
@@ -1808,6 +1799,7 @@ function SkillRow({
           <b key={item}>{item.toUpperCase()}</b>
         ))}
       </span>
+      {!(tool.requiresNetwork || tool.permissions?.includes("network")) && <span className="skill-network-tag">可离线</span>}
       {(tool.requiresNetwork || tool.permissions?.includes("network")) && (
         <span className="skill-network-tag network">
           <Cloud size={12} />

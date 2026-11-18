@@ -7,24 +7,24 @@ import * as backend from "./lib/backend";
 describe("zhai", () => {
   it("无附件能力可填写测试参数、测试发布并运行", async () => {
     await backend.saveAgentTool({id:"generator-ui-check",name:"无附件参数验收",description:"从零生成测试",source:"designed",kind:"python",supportedExtensions:[],available:false,availabilityDetail:"待测试",status:"draft",testStatus:"untested",parameters:[{key:"title",label:"测试标题",type:"text",required:true},{key:"count",label:"测试数量",type:"number",required:true},{key:"mode",label:"测试模式",type:"choice",required:true,choices:["完整","简略"]}],steps:[]});
-    const tested = vi.spyOn(backend, "testSkill");
+    const tested = vi.spyOn(backend, "testAndRepairSkill");
     const ran = vi.spyOn(backend, "runSkill").mockResolvedValue({summary:"生成成功",outputDirectory:"/tmp/check",artifacts:[]});
     render(<App />);
     fireEvent.click(screen.getByRole("button", {name:"能力包"}));
     fireEvent.click(await screen.findByRole("button", {name:"全部"}));
     fireEvent.click(await screen.findByRole("button", {name:/^无附件参数验收/}));
-    fireEvent.click(await screen.findByRole("button", {name:"测试生成文件"}));
+    fireEvent.click(await screen.findByRole("button", {name:"开始测试"}));
     expect(tested).not.toHaveBeenCalled();
     fireEvent.change(screen.getByLabelText(/测试标题/), {target:{value:"部门收集表"}});
     expect(screen.getByLabelText(/测试模式/)).toHaveValue("");
     fireEvent.change(screen.getByLabelText(/测试模式/), {target:{value:"完整"}});
     fireEvent.change(screen.getByLabelText(/测试数量/), {target:{value:"5"}});
     fireEvent.change(screen.getByLabelText(/测试数量/), {target:{value:""}});
-    fireEvent.click(screen.getByRole("button", {name:"测试生成文件"}));
+    fireEvent.click(screen.getByRole("button", {name:"开始测试"}));
     expect(tested).not.toHaveBeenCalled();
     fireEvent.change(screen.getByLabelText(/测试数量/), {target:{value:"0"}});
-    fireEvent.click(screen.getByRole("button", {name:"测试生成文件"}));
-    await waitFor(() => expect(tested).toHaveBeenCalledWith("generator-ui-check", [], {title:"部门收集表",count:0,mode:"完整"}));
+    fireEvent.click(screen.getByRole("button", {name:"开始测试"}));
+    await waitFor(() => expect(tested).toHaveBeenCalledWith(expect.objectContaining({skillId:"generator-ui-check", samplePaths:[], parameters:{title:"部门收集表",count:0,mode:"完整"}}), expect.any(Function)));
     await waitFor(() => expect(screen.getByRole("button", {name:"发布给 Agent"})).toBeEnabled());
     fireEvent.click(screen.getByRole("button", {name:"发布给 Agent"}));
     const run = await screen.findByRole("button", {name:"开始运行"});
@@ -90,17 +90,15 @@ describe("zhai", () => {
   it("能力包设计保留原有三栏对话布局并提供验收引导", async () => {
     const { container } = render(<App />);
     const design = await screen.findByRole("button", { name: /设计能力包/ });
+    await waitFor(() => expect(design).toBeEnabled());
     fireEvent.click(design);
     expect(container.querySelector(".app-shell")).not.toHaveClass("design-focus");
     expect(container.querySelector(".agent-workspace")).not.toHaveClass("skill-design-workspace");
     expect(container.querySelector(".session-column")).toBeInTheDocument();
     expect(container.querySelector(".context-column")).toBeInTheDocument();
-    expect(screen.getByText("能力包设计工作台")).toBeInTheDocument();
-    expect(screen.getByText("定义规则")).toBeInTheDocument();
-    expect(screen.getByText("生成实现")).toBeInTheDocument();
-    expect(screen.getByText("结构校验")).toBeInTheDocument();
-    expect(screen.getByText("保存草稿")).toBeInTheDocument();
-    expect(screen.getByText("1. 添加样本")).toBeInTheDocument();
+    expect(screen.queryByText("能力包设计工作台")).not.toBeInTheDocument();
+    expect(screen.queryByText("结构校验")).not.toBeInTheDocument();
+    expect(await screen.findByText("1. 添加样本")).toBeInTheDocument();
     expect(screen.getByText("2. 说清规则")).toBeInTheDocument();
     expect(screen.getByText("3. 测试发布")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "公文套版" }));
@@ -110,8 +108,10 @@ describe("zhai", () => {
 
   it("切换到能力包页面不会卸载正在工作的文件 Agent", async () => {
     const { container } = render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: /设计能力包/ }));
-    expect(screen.getByText("能力包设计工作台")).toBeInTheDocument();
+    const design = await screen.findByRole("button", { name: /设计能力包/ });
+    await waitFor(() => expect(design).toBeEnabled());
+    fireEvent.click(design);
+    expect(await screen.findByRole("button", { name: "新建设计会话" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "能力包" }));
     expect(container.querySelector(".persistent-agent-view")).toHaveAttribute("hidden");
@@ -119,7 +119,7 @@ describe("zhai", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "文件 Agent" }));
     expect(container.querySelector(".persistent-agent-view")).not.toHaveAttribute("hidden");
-    expect(screen.getByText("能力包设计工作台")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "新建设计会话" })).toBeInTheDocument();
   });
 
   it("能力包页只负责查找、管理和运行能力", async () => {

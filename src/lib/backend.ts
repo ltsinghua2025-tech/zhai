@@ -63,6 +63,11 @@ import type {
   OfficeFontStatus,
   CodexRuntimeStatus,
   SkillDesignEvent,
+  SkillDesignState,
+  SkillDesignRunResult,
+  DesignAndTestRequest,
+  TestAndRepairRequest,
+  TaskSkillSeed,
 } from "../types";
 
 export { hasTauriRuntime as isTauri } from "./tauriCompat";
@@ -201,15 +206,22 @@ export async function removeAgentAttachments(sessionId: string, attachmentIds: s
 export async function addAgentAttachments(
   sessionId: string,
   items: AgentAttachmentInput[],
+  deduplicateSamples = false,
 ): Promise<AgentAttachment[]> {
-  if (isTauri()) return invoke("add_agent_attachments", { request: { sessionId, items } });
+  if (isTauri()) return invoke("add_agent_attachments", { request: { sessionId, items, deduplicateSamples } });
   if (isWebApiEnabled()) {
     const uploaded = await Promise.all(items.map((item) => uploadWebSelection(sessionId, item)));
     return uploaded.flat();
   }
   const found = mockAgentSessions.find((item) => item.session.id === sessionId);
   if (!found) throw new Error("会话不存在");
-  const attachments = items.map((item): AgentAttachment => {
+  const existingPaths = new Set(found.attachments.map(item => item.localSnapshotPath));
+  const attachments = items.filter(item => {
+    if (!deduplicateSamples || item.kind === "url") return true;
+    if (existingPaths.has(item.path)) return false;
+    existingPaths.add(item.path);
+    return true;
+  }).map((item): AgentAttachment => {
     const value = item.kind === "url" ? item.url : item.path;
     return {
       id: randomId(),
@@ -1179,6 +1191,45 @@ export async function designAgentTool(
 
 export async function cancelSkillDesign(designId: string): Promise<void> {
   if (isTauri()) return invoke("cancel_skill_design", { designId });
+}
+
+const mockDesignStates = new Map<string, SkillDesignState>();
+
+export async function getTaskSkillSeed(sessionId: string, turnId: string): Promise<TaskSkillSeed> {
+  if (isTauri()) return invoke("get_task_skill_seed", { sessionId, turnId });
+  if (isWebApiEnabled()) throw new Error("当前 Web 服务尚不支持从任务提取测试版，请从设计能力包入口创建。");
+  const detail = await getAgentSession(sessionId);
+  return { prompt: detail.messages.filter(m => m.turnId === turnId).map(m => m.content).join("\n"), samplePaths: detail.attachments.filter(a => a.kind !== "artifact").map(a => a.localSnapshotPath!).filter(Boolean), requiresNetwork: false };
+}
+
+export async function getSkillDesignState(sessionId: string): Promise<SkillDesignState | null> {
+  if (isTauri()) return invoke("get_skill_design_state", { sessionId });
+  if (isWebApiEnabled()) return webRequest(`/sessions/${encodeURIComponent(sessionId)}/design`);
+  return structuredClone(mockDesignStates.get(sessionId) ?? null);
+}
+
+export async function saveSkillDesignState(sessionId: string, designState: SkillDesignState): Promise<SkillDesignState> {
+  if (isTauri()) return invoke("save_skill_design_state", { sessionId, designState });
+  if (isWebApiEnabled()) return webRequest(`/sessions/${encodeURIComponent(sessionId)}/design`, { method: "PUT", body: JSON.stringify(designState) });
+  mockDesignStates.set(sessionId, structuredClone(designState));
+  return structuredClone(designState);
+}
+
+export async function designAndTestSkill(request: DesignAndTestRequest, onEvent?: (event: SkillDesignEvent) => void): Promise<SkillDesignRunResult> {
+  if (isTauri()) return invokeWithEvents("design_and_test_skill", { request }, (event: SkillDesignEvent) => onEvent?.(event));
+  const generated = await designAgentTool(request.design, onEvent);
+  const skill = await saveAgentTool(generated);
+  if (!request.autoTest || (!request.samplePaths.length && skill.supportedExtensions.length)) return { skill };
+  return testAndRepairSkill({ runId: request.runId, skillId: skill.id, samplePaths: request.samplePaths, parameters: request.parameters }, onEvent);
+}
+
+export async function testAndRepairSkill(request: TestAndRepairRequest, onEvent?: (event: SkillDesignEvent) => void): Promise<SkillDesignRunResult> {
+  if (isTauri()) return invokeWithEvents("test_and_repair_skill", { request }, (event: SkillDesignEvent) => onEvent?.(event));
+  if (isWebApiEnabled() && request.repair) throw new Error("当前 Web 服务尚不支持自动修复，请先在设计对话中修改后重测。");
+  onEvent?.({ type: "started", designId: request.runId });
+  onEvent?.({ type: "phase", phase: "testing", message: "正在运行样本测试", elapsedSeconds: 0 });
+  const skill = await testSkill(request.skillId, request.samplePaths, request.parameters);
+  return { skill, testResult: { status: skill.testStatus === "passed" ? "passed" : "failed", summary: skill.availabilityDetail, outputs: [], parameters: request.parameters, repairable: !isWebApiEnabled() } };
 }
 
 export async function generateCitizenReply(input: CitizenReplyRequest): Promise<CitizenReplyResult> {
