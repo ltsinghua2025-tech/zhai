@@ -875,6 +875,53 @@ def convert_office(
     raise RuntimeError("没有可用的办公转换器；请配置已验证的 WPS 桥接，或安装 LibreOffice 作为回退")
 
 
+def center_footer_page_numbers(document: Any) -> int:
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    seen = set()
+    changes = 0
+    for section in document.sections:
+        footers = [section.footer]
+        if section.different_first_page_header_footer:
+            footers.append(section.first_page_footer)
+        if document.settings.odd_and_even_pages_header_footer:
+            footers.append(section.even_page_footer)
+        for footer in footers:
+            root = footer._element
+            if root in seen:
+                continue
+            seen.add(root)
+            paragraphs = footer.paragraphs
+            fields = [node for node in root.xpath('.//w:fldSimple | .//w:instrText')
+                      if re.match(r'^\s*PAGE(?:\s|$)', node.get(qn('w:instr')) or node.text or '', re.I)]
+            if fields:
+                # Moving a mixed paragraph or a table cell would also move unrelated content.
+                standalone = next((p for p in paragraphs if len(fields) == 1 and fields[0].getparent() is p._p
+                                   and all(child is fields[0] or child.tag == qn('w:pPr') for child in p._p)), None)
+                if standalone is None:
+                    raise ValueError("已有复杂页码，请在 Word 中核对页脚布局后再调整。")
+                if standalone.alignment != WD_ALIGN_PARAGRAPH.CENTER:
+                    standalone.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    changes += 1
+                continue
+            empty = len(root) == 1 and len(paragraphs) == 1 and all(child.tag == qn('w:pPr') for child in paragraphs[0]._p)
+            p = paragraphs[0] if empty else footer.add_paragraph()
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            field = OxmlElement('w:fldSimple')
+            field.set(qn('w:instr'), ' PAGE ')
+            field.set(qn('w:dirty'), 'true')
+            run = OxmlElement('w:r')
+            display = OxmlElement('w:t')
+            display.text = '1'
+            run.append(display)
+            field.append(run)
+            p._p.append(field)
+            changes += 1
+    return changes
+
+
 def process_docx(
     source: Path,
     target: Path,
@@ -884,7 +931,7 @@ def process_docx(
 ) -> dict[str, Any]:
     docx = import_docx()
     document = docx.Document(source)
-    layout_only = not ai_reviews and operation_kinds <= {"normalize_docx_styles", "normalize_whitespace", "clean_metadata"}
+    layout_only = not ai_reviews and operation_kinds <= {"normalize_docx_styles", "normalize_whitespace", "clean_metadata", "center_docx_page_numbers"}
     def content_signature(doc: Any) -> tuple[Any, ...]:
         from lxml import etree
         texts = tuple(re.sub(r'\s+', '', ''.join(e.itertext())) for e in doc._element.xpath('.//w:t'))
@@ -986,6 +1033,8 @@ def process_docx(
         else:
             changes += normalize_docx(document)
 
+    if "center_docx_page_numbers" in operation_kinds:
+        changes += center_footer_page_numbers(document)
     clear_docx_metadata(document)
     def save_checked(temporary: Path) -> None:
         document.save(temporary)

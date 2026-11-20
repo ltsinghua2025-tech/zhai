@@ -1201,8 +1201,8 @@ const mockDesignStates = new Map<string, SkillDesignState>();
 
 export async function getTaskSkillSeed(sessionId: string, turnId: string): Promise<TaskSkillSeed> {
   if (isTauri()) return invoke("get_task_skill_seed", { sessionId, turnId });
-  if (isWebApiEnabled()) throw new Error("当前 Web 服务尚不支持从任务提取测试版，请从设计能力包入口创建。");
   const detail = await getAgentSession(sessionId);
+  if (isWebApiEnabled()) return { prompt: detail.messages.find(m => m.turnId === turnId && m.role === "user")?.content || "", samplePaths: [], requiresNetwork: false };
   return { prompt: detail.messages.filter(m => m.turnId === turnId).map(m => m.content).join("\n"), samplePaths: detail.attachments.filter(a => a.kind !== "artifact").map(a => a.localSnapshotPath!).filter(Boolean), requiresNetwork: false };
 }
 

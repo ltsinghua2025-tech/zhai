@@ -76,6 +76,12 @@ export function webListSessions(signal?: AbortSignal) {
   return request<AgentSession[]>("/sessions", { signal });
 }
 
+export function webDesignFromTurn(sessionId: string, turnId: string) {
+  return request<{ sessionId: string }>(`/sessions/${encodeURIComponent(sessionId)}/turns/${encodeURIComponent(turnId)}/design`, {
+    method: "POST", body: "{}",
+  });
+}
+
 export function webGetSession(sessionId: string, signal?: AbortSignal) {
   return request<AgentSessionDetail>(`/sessions/${encodeURIComponent(sessionId)}`, { signal });
 }

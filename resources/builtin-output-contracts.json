@@ -3,6 +3,7 @@
   "officecli_inspect": ["json"],
   "apply_redhead": ["docx"],
   "docx_to_gongwen": ["docx"],
+  "center_docx_page_numbers": ["docx"],
   "word_to_pdf": ["pdf"],
   "excel_to_pdf": ["pdf"],
   "doc_to_docx": ["docx"],

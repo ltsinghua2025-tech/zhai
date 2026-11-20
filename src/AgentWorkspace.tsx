@@ -67,7 +67,7 @@ import { SkillTestPanel, skillInputExtensions, skillInputProblem } from "./Skill
 import { artifactsForMessage } from "./lib/messageArtifacts";
 import { webTurnMaterials } from "./lib/turnMaterials";
 import shellAvatar from "./assets/zhai-shell-avatar.png";
-import { isWebApiEnabled } from "./lib/webApi";
+import { isWebApiEnabled, webDesignFromTurn } from "./lib/webApi";
 
 const supportedExtensions = [
   "docx",
@@ -918,10 +918,16 @@ export default function AgentWorkspace({ active = true, profile, apiKey, openMod
   };
 
   const saveTaskAsSkill = async (turnId: string) => {
-    if (busyRef.current || !activeId || webMode) return;
+    if (busyRef.current || !activeId) return;
     const originalSession = activeId;
     busyRef.current = true; setBusy(true); setError(undefined);
     try {
+      if (webMode) {
+        const created = await webDesignFromTurn(originalSession, turnId);
+        await refreshSessions(created.sessionId);
+        await restoreDesign(created.sessionId);
+        return;
+      }
       const seed = await getTaskSkillSeed(originalSession, turnId);
       const candidates = detail?.toolRuns.filter(run => run.turnId === turnId && run.status === "completed") || [];
       const run = candidates.find(run => run.toolId === "codex_harness") || [...candidates].reverse().find(run => run.toolId === "run_python" && !run.detail?.includes("样本结构诊断"));
@@ -1324,7 +1330,7 @@ export default function AgentWorkspace({ active = true, profile, apiKey, openMod
                       ))}
                     </div>
                   ))}
-                  {!webMode && message.role === "assistant" && message.turnId && artifactsForMessage(message, detail.messages, artifactGroups).length > 0 && (
+                  {message.role === "assistant" && message.turnId && (webMode ? message.canDesignSkill : artifactsForMessage(message, detail.messages, artifactGroups).length > 0) && (
                     <button className="task-to-skill" disabled={busy || loading} onClick={() => void saveTaskAsSkill(message.turnId!)}>
                       <FloppyDisk size={15} />生成能力包测试版
                     </button>

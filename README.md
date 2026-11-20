@@ -4,6 +4,8 @@ ZHAI 可以批量排版 Word、公文套红、合并 Excel 和处理 PDF。经�
 
 [浏览器体验](https://ltsinghua2025-tech.github.io/zhai/)可直接运行公文排版，支持内置合成样例和单个不超过 10 MB 的 DOCX。排版在浏览器中完成，无需填写 API Key。桌面版提供批量操作、更多能力包和联网文件 Agent。网站依赖使用 `python3 preview/build_browser_runtime.py` 构建，授权与校验见 `preview/runtime/`。
 
+自托管的 Sealos 网页版同样使用本仓库的前端和文件引擎。`server/` 提供会话、文件处理和能力包接口。镜像构建、存储、健康检查及模型配置见 [Sealos ARM64 镜像说明](deploy/sealos/IMAGE.md)。
+
 ## 下载与安装
 
 银河麒麟 ARM64 安装包和校验值见 [Linux 0.29.0-1](https://github.com/ltsinghua2025-tech/zhai/releases/tag/v0.29.0-linux)。macOS Apple Silicon 安装包见 [Mac 0.28.2](https://github.com/ltsinghua2025-tech/zhai/releases/tag/v0.28.2)。两个平台分别发布。
