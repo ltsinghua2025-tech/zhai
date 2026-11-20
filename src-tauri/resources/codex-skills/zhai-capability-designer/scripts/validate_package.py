@@ -31,13 +31,16 @@ def load_json(path: Path):
 def validate_python(path: Path) -> None:
     if not path.is_file():
         fail(f"missing Python implementation: {path}")
+    source = path.read_text(encoding="utf-8")
     try:
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        tree = ast.parse(source, filename=str(path))
     except SyntaxError as exc:
         fail(f"Python syntax error: {exc}")
     functions = {node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
     if "run" not in functions:
         fail(f"{path} must expose run(context, params)")
+    if "output_dir" not in source:
+        fail(f"{path}: implement the requested transformation and save a new artifact under context.output_dir")
 
 
 def main() -> None:
@@ -53,6 +56,8 @@ def main() -> None:
     missing = sorted(required.difference(contract))
     if missing:
         fail("missing fields: " + ", ".join(missing))
+    if contract.get("name") == "待设计能力包":
+        fail("the package still has its initial placeholder; write its contract and implementation")
     if contract["schemaVersion"] != 1:
         fail("schemaVersion must be 1")
     if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{1,63}", str(contract["id"])):
@@ -121,12 +126,6 @@ def main() -> None:
                 except ValueError:
                     fail(f"stage {index + 1} script escapes package")
                 validate_python(script)
-                source = script.read_text(encoding="utf-8")
-                if "output_dir" not in source:
-                    fail(
-                        f"stage {index + 1} must write a new artifact to context.output_dir; "
-                        "returning a previous-stage path is invalid"
-                    )
     cases_path = root / "tests" / "cases.json"
     if cases_path.exists() and not isinstance(load_json(cases_path), list):
         fail("tests/cases.json must contain an array")

@@ -211,6 +211,7 @@ export type AiProfile = {
   baseUrl: string;
   defaultModel: string;
   keyStored: boolean;
+  managed?: boolean;
   lastTest?: {
     success: boolean;
     returnedModel?: string;
@@ -254,6 +255,7 @@ export type AgentTool = {
   >;
   sourceCode?: string;
   testStatus?: "untested" | "passed" | "failed";
+  testResult?: SkillTestResult;
   status?: SkillStatus;
   supportedExtensions: string[];
   available: boolean;
@@ -371,6 +373,7 @@ export type AgentMessage = {
   content: string;
   createdAt: string;
   turnId?: string;
+  attachmentIds?: string[];
 };
 
 export type AgentSessionDetail = {
@@ -398,6 +401,7 @@ export type AgentEvent =
   | { type: "turn_cancelled"; sessionId: string; turnId: string };
 
 export type SendAgentMessageRequest = {
+  attachmentIds?: string[];
   sessionId: string;
   content: string;
   profileId: string;

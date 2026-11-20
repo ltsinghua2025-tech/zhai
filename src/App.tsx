@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
-import { openDialog as open, randomId } from "./lib/tauriCompat";
+import { getWebSelectionFiles, openDialog as open, randomId, releaseWebSelection } from "./lib/tauriCompat";
 import {
   ArrowCounterClockwise,
   ArrowLeft,
@@ -126,6 +126,10 @@ const modelPresets = {
 };
 
 function fileName(path: string) {
+  if (path.startsWith("web-selection:")) {
+    const files = getWebSelectionFiles(path);
+    if (files.length) return files[0].webkitRelativePath?.split("/")[0] || files.map(file => file.name).join("、");
+  }
   return path.split(/[\\/]/).pop() || path;
 }
 
@@ -156,11 +160,23 @@ function App() {
   const [tools, setTools] = useState<AgentTool[]>([]);
   const [profiles, setProfiles] = useState<AiProfile[]>([]);
   const [activeProfile, setActiveProfile] = useState<AiProfile>();
+  const selectProfile = (next?: AiProfile) => {
+    if (next?.id !== activeProfile?.id) setSessionApiKey("");
+    setActiveProfile(next);
+    if (!webMode && next) localStorage.setItem("zhai.desktop.activeProfile", next.id);
+  };
   const [sessionApiKey, setSessionApiKey] = useState("");
   const [busy, setBusy] = useState<BusyState>("idle");
   const [error, setError] = useState<string>();
   const [designTarget, setDesignTarget] = useState<AgentTool>();
   const [skillLibraryInputs, setSkillLibraryInputs] = useState(() => new Map<string, SkillLibraryInputs>());
+  const retainedSelections = useRef(new Set<string>());
+  useEffect(() => {
+    const next = new Set([...skillLibraryInputs.values()].flatMap(inputs => inputs.paths.filter(path => path.startsWith("web-selection:"))));
+    for (const path of retainedSelections.current) if (!next.has(path)) releaseWebSelection(path);
+    retainedSelections.current = next;
+  }, [skillLibraryInputs]);
+  useEffect(() => () => { retainedSelections.current.forEach(releaseWebSelection); }, []);
 
   const refreshTools = async () => {
     const items = await listAgentTools();
@@ -172,7 +188,8 @@ function App() {
     listAiProfiles()
       .then((items) => {
         setProfiles(items);
-        setActiveProfile((current) => current || items[0]);
+        const lastId = webMode ? null : localStorage.getItem("zhai.desktop.activeProfile");
+        setActiveProfile(current => current || items.find(item => item.id === lastId) || items[0]);
       })
       .catch((reason) => setError(String(reason)));
   }, []);
@@ -203,12 +220,12 @@ function App() {
             label="能力包"
             onClick={() => setView("skills")}
           />
-          <NavButton
+          {!activeProfile?.managed && <NavButton
             active={view === "models"}
             icon={<Cloud size={18} />}
             label="模型服务"
             onClick={() => setView("models")}
-          />
+          />}
         </nav>
         <div className="rail-note">
           <Sparkle size={16} weight="fill" />
@@ -222,7 +239,9 @@ function App() {
           <div className="web-mode-notice">
             <Cloud size={15} />
             <span>
-              单位试用版 0.2：已配置默认算力。支持 DOCX 排版、文字修改、Excel 汇总和 PDF 文本提取；复杂版式会保留并提示。材料在服务器处理，同一访问账号共享会话。
+              {activeProfile?.managed
+                ? "评委体验版 0.28.2 · 本浏览器单独保存会话和成果。材料在服务器处理，可上传 DOCX、XLSX 或带文字层的 PDF。"
+                : "网页版 0.28.2 · 支持 DOCX 排版、文字修改、Excel 汇总和 PDF 文本提取。材料在服务器处理。"}
             </span>
           </div>
         )}
@@ -233,7 +252,7 @@ function App() {
           <AgentWorkspace
             active={view === "agent"}
             profile={activeProfile}
-            apiKey={sessionApiKey}
+            apiKey={webMode ? sessionApiKey : ""}
             openModels={() => setView("models")}
             designTarget={designTarget}
             onDesignTargetHandled={() => setDesignTarget(undefined)}
@@ -245,7 +264,7 @@ function App() {
           <SkillsWorkspace
             tools={tools}
             profile={activeProfile}
-            apiKey={sessionApiKey}
+            apiKey={webMode ? sessionApiKey : ""}
             busy={busy}
             error={error}
             openModels={() => setView("models")}
@@ -260,12 +279,12 @@ function App() {
             }}
           />
         )}
-        {view === "models" && (
+        {view === "models" && !activeProfile?.managed && (
           <ModelsWorkspace
             profiles={profiles}
             setProfiles={setProfiles}
             activeProfile={activeProfile}
-            setActiveProfile={setActiveProfile}
+            setActiveProfile={selectProfile}
             sessionApiKey={sessionApiKey}
             setSessionApiKey={setSessionApiKey}
             busy={busy}
@@ -867,12 +886,14 @@ function SkillsWorkspace({
   const [selectedSkill, setSelectedSkill] = useState<AgentTool>();
   const [deletedSkills, setDeletedSkills] = useState<AgentTool[]>([]);
   const [runEvent, setRunEvent] = useState<SkillRunEvent>();
+  const [stoppingRun, setStoppingRun] = useState(false);
   const selectedInputs = selectedSkill ? skillLibraryInputs.get(selectedSkill.id) || defaultSkillLibraryInputs(selectedSkill) : undefined;
   const needsFiles = !!selectedSkill?.supportedExtensions.length;
   const runPaths = needsFiles ? selectedInputs?.paths || [] : [];
   const runParameters = selectedInputs?.parameters || {};
   const missingRunParameters = selectedSkill ? missingSkillParameters(selectedSkill, runParameters) : [];
   const [runResult, setRunResult] = useState<SkillRunResult>();
+  const singleWebArtifact = isWebApiEnabled() && runResult?.artifacts.length === 1 ? runResult.artifacts[0] : undefined;
   const sampleResult = selectedInputs?.testResult;
   const testInputsChanged = selectedInputs?.needsRetest || false;
   const [testProgress, setTestProgress] = useState<string>();
@@ -1039,7 +1060,8 @@ function SkillsWorkspace({
         for (const { key } of skill.parameters) {
           if (Object.prototype.hasOwnProperty.call(current.parameters, key)) parameters[key] = current.parameters[key];
         }
-        const result = current.testResult?.status === "passed" && skill.testStatus !== "passed" ? undefined : current.testResult;
+        const result = current.testResult?.status === "passed" && skill.testStatus !== "passed" ? undefined
+          : current.testResult || (!current.needsRetest ? skill.testResult : undefined);
         return { ...current, parameters, testResult: result };
       });
       setSelectedSkill(skill);
@@ -1170,12 +1192,22 @@ function SkillsWorkspace({
       setError(`请填写${missing.map(parameter => `“${parameter.label}”`).join("、")}。`);
       return;
     }
-    setBusy("running"); setError(undefined); setRunEvent(undefined); setRunResult(undefined);
+    setBusy("running"); setError(undefined); setNotice(undefined); setRunEvent(undefined); setRunResult(undefined); setStoppingRun(false);
     try {
       const result = await runSkill(selectedSkill.id, runPaths, runParameters, setRunEvent);
       setRunResult(result);
       setNotice(result.summary);
-    } catch (reason) { setError(String(reason)); } finally { setBusy("idle"); }
+    } catch (reason) {
+      setRunEvent(undefined);
+      if (isWebApiEnabled() && /已停止|已取消/.test(String(reason))) setNotice("运行已停止。");
+      else setError(String(reason));
+    } finally { setBusy("idle"); setStoppingRun(false); }
+  };
+
+  const stopRun = async (runId: string) => {
+    setStoppingRun(true);
+    try { await cancelSkillRun(runId); }
+    catch (reason) { setStoppingRun(false); setError(String(reason)); }
   };
 
   const removeSkill = async (tool: AgentTool) => {
@@ -1443,8 +1475,8 @@ function SkillsWorkspace({
                         {runPaths.map((path) => (
                           <div key={path}>
                             <File size={14} />
-                            <span title={path}>{path.split(/[\\/]/).pop() || path}<small>{path}</small></span>
-                            <button aria-label={`移除 ${path}`} onClick={() => changeSelectedInputs(current => ({ ...current, paths: current.paths.filter(item => item !== path) }))}><X size={13} /></button>
+                            <span title={fileName(path)}>{fileName(path)}{!isWebApiEnabled() && <small>{path}</small>}</span>
+                            <button disabled={busy !== "idle"} aria-label={`移除 ${fileName(path)}`} onClick={() => changeSelectedInputs(current => ({ ...current, paths: current.paths.filter(item => item !== path) }))}><X size={13} /></button>
                           </div>
                         ))}
                       </div>
@@ -1486,14 +1518,18 @@ function SkillsWorkspace({
                 <div className={`skill-run-progress ${runEvent.type}`}>
                   {runEvent.type === "progress" && <progress max={Math.max(runEvent.total, 1)} value={runEvent.current} />}
                   <span>{runEvent.type === "progress" ? runEvent.message : runEvent.type === "started" ? "已开始处理" : runEvent.type === "completed" ? "处理完成" : runEvent.type === "cancelled" ? "已取消" : runEvent.type === "failed" ? runEvent.message : ""}</span>
-                  {busy === "running" && "runId" in runEvent && <button onClick={() => cancelSkillRun(runEvent.runId)}><X size={13} />停止</button>}
+                  {busy === "running" && "runId" in runEvent && <button disabled={stoppingRun} onClick={() => void stopRun(runEvent.runId)}><X size={13} />{stoppingRun ? "正在停止" : "停止"}</button>}
                 </div>
               )}
               {runResult && (
                 <section className="skill-run-result">
                   <CheckCircle size={18} weight="fill" />
-                  <div><strong>处理完成</strong><span>{runResult.summary}</span><small>{runResult.outputDirectory}</small></div>
-                  <button onClick={() => revealInFinder(runResult.outputDirectory)}>打开成果文件夹</button>
+                  <div><strong>处理完成</strong><span>{runResult.summary}</span>
+                    {singleWebArtifact ? <small>{singleWebArtifact.name}</small> : !isWebApiEnabled() && <small>{runResult.outputDirectory}</small>}
+                  </div>
+                  <button onClick={() => revealInFinder(singleWebArtifact?.localSnapshotPath || runResult.outputDirectory)}>
+                    {isWebApiEnabled() ? singleWebArtifact ? "下载成果" : "下载全部成果" : "打开成果文件夹"}
+                  </button>
                 </section>
               )}
               <footer>
@@ -2143,6 +2179,8 @@ function ModelsWorkspace({
   const [baseUrl, setBaseUrl] = useState(modelPresets.deepseek.baseUrl);
   const [model, setModel] = useState(modelPresets.deepseek.model);
   const [testResult, setTestResult] = useState<string>();
+  const [addingProfile, setAddingProfile] = useState(false);
+  const editingProfile = addingProfile ? undefined : activeProfile;
 
   useEffect(() => {
     if (loaded) return;
@@ -2179,7 +2217,8 @@ function ModelsWorkspace({
       setError("请填写服务名称、HTTPS 地址和模型名");
       return;
     }
-    if (!sessionApiKey.trim() && !activeProfile?.keyStored) {
+    const hasNewEndpoint = !webMode && !!editingProfile && baseUrl.trim().replace(/\/+$/, "") !== editingProfile.baseUrl;
+    if (!sessionApiKey.trim() && (!editingProfile?.keyStored || hasNewEndpoint)) {
       setError(
         webMode
           ? "请粘贴本次使用的 API Key"
@@ -2191,7 +2230,7 @@ function ModelsWorkspace({
     setError(undefined);
     setTestResult(undefined);
     try {
-      const id = activeProfile?.id || `model-${randomId()}`;
+      const id = (!hasNewEndpoint && editingProfile?.id) || `model-${randomId()}`;
       const providedKey = sessionApiKey.trim();
       const saved = await saveAiProfile({
         id,
@@ -2207,6 +2246,7 @@ function ModelsWorkspace({
         hydrated,
       ]);
       setActiveProfile(hydrated);
+      setAddingProfile(false);
       if (shouldTest) {
         const result = await testAiConnection(
           hydrated.id,
@@ -2283,6 +2323,12 @@ function ModelsWorkspace({
       )}
       <section className="model-form">
         <div className="preset-row">
+          {!webMode && activeProfile && !addingProfile && <button onClick={() => {
+            setAddingProfile(true);
+            setSessionApiKey("");
+            setError(undefined);
+            choosePreset("compatible");
+          }}>新增模型配置</button>}
           <button
             className={preset === "deepseek" ? "is-active" : ""}
             onClick={() => choosePreset("deepseek")}
@@ -2343,7 +2389,7 @@ function ModelsWorkspace({
                 placeholder={
                   webMode
                     ? "默认算力无需填写；切换接口时填写自己的密钥"
-                    : activeProfile?.keyStored
+                    : editingProfile?.keyStored
                       ? "已安全保存；如需更换，请粘贴新 Key"
                       : "粘贴后将保存到本机系统凭据库"
                 }
@@ -2369,7 +2415,7 @@ function ModelsWorkspace({
                 : "API Key 保存在本机系统凭据库，重启后继续使用；只有你主动删除时才清除。"}
             </small>
           </span>
-          {!webMode && activeProfile?.keyStored && (
+          {!webMode && editingProfile?.keyStored && (
             <button
               className="credential-delete"
               disabled={busy !== "idle"}
@@ -2416,6 +2462,9 @@ function ModelsWorkspace({
             <button
               key={item.id}
               onClick={() => {
+                setAddingProfile(false);
+                setSessionApiKey("");
+                setTestResult(undefined);
                 setPreset(presetForProvider(item.provider));
                 setActiveProfile(item);
                 setDisplayName(item.displayName);

@@ -22,6 +22,26 @@ impl EventSink<AgentEvent> for Events {
     }
 }
 
+fn copy_online_profile(app: &AppHandle, state: &AppState, stdin_key: bool) -> Result<(String, String), String> {
+    let source = Connection::open_with_flags(
+        app_data_directory(app)?.join("history.sqlite3"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ).map_err(|e| e.to_string())?;
+    let selected = std::env::var("ZHAI_SELF_CHECK_PROFILE_ID").ok();
+    let (id, provider, name, url, model): (String,String,String,String,String) = source.query_row(
+        "SELECT id,provider,display_name,base_url,default_model FROM ai_profiles
+         WHERE (key_stored=1 OR (?2 AND id=?1)) AND (id=?1 OR (?1 IS NULL AND provider='deepseek'))
+         ORDER BY last_test_success DESC,id LIMIT 1", params![selected, stdin_key],
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)),
+    ).map_err(|_| "没有可供联网自检的模型配置")?;
+    state.db.lock().execute(
+        "INSERT INTO ai_profiles(id,provider,display_name,base_url,default_model,key_stored)
+         VALUES(?1,?2,?3,?4,?5,1) ON CONFLICT(id) DO UPDATE SET provider=excluded.provider,
+         display_name=excluded.display_name,base_url=excluded.base_url,default_model=excluded.default_model,key_stored=1",
+        params![id,provider,name,url,model],
+    ).map_err(|e| e.to_string())?;
+    Ok((id,model))
+}
+
 /// Explicitly opted-in live design check; real credentials are read through the
 /// existing keychain profile, while all skill/library state stays isolated.
 pub(super) fn design(app: &AppHandle, root: &Path) -> Result<Value, String> {
@@ -35,21 +55,9 @@ pub(super) fn design(app: &AppHandle, root: &Path) -> Result<Value, String> {
         if value.is_empty() { return Err("联网自检缺少本次密钥".into()); }
         Some(value)
     } else { None };
-    let source = Connection::open_with_flags(
-        app_data_directory(app)?.join("history.sqlite3"),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .map_err(|e| e.to_string())?;
-    let selected=std::env::var("ZHAI_SELF_CHECK_PROFILE_ID").ok();
-    let (id, provider, name, url, model): (String, String, String, String, String) = source.query_row(
-        "SELECT id,provider,display_name,base_url,default_model FROM ai_profiles WHERE key_stored=1 AND ((?1 IS NOT NULL AND id=?1) OR (?1 IS NULL AND provider='deepseek')) ORDER BY last_test_success DESC,id LIMIT 1", params![selected],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?,r.get(4)?)),
-    ).map_err(|_| "没有已保存凭据的指定模型配置")?;
-    drop(source);
-    let state = AppState::open(root.join("design-data"))?;
-    state.db.lock().execute("INSERT INTO ai_profiles(id,provider,display_name,base_url,default_model,key_stored) VALUES(?1,?2,?3,?4,?5,1)", params![id,provider,name,url,model]).map_err(|e|e.to_string())?;
-    app.manage(state);
     let state = app.state::<AppState>();
+    let (id, model) = copy_online_profile(app, &state, session_key.is_some())?;
+    let provider = get_ai_profile(&state, &id)?.provider;
     if std::env::args().any(|a| a == "--self-check-design-resume") {
         return design_resume_check(&state, &id, &model, root, session_key.as_deref());
     }
@@ -221,6 +229,17 @@ fn design_resume_check(state: &AppState, profile_id: &str, model: &str, root: &P
 
 fn legacy_staging_check(app: &AppHandle, state: &AppState, source: &Path, root: &Path, mode: &str) -> Result<(), String> {
     use std::net::TcpListener;
+    #[derive(Default)]
+    struct ReplyEvents(parking_lot::Mutex<String>);
+    impl EventSink<AgentEvent> for ReplyEvents {
+        fn send(&self, event: AgentEvent) -> Result<(), String> {
+            if let AgentEvent::AssistantDelta { text, .. } = event {
+                self.0.lock().push_str(&text);
+            }
+            Ok(())
+        }
+    }
+    let events = ReplyEvents::default();
     eprintln!("本地协议与真实文件链路自检：legacy {mode}");
     let source_path = source.to_path_buf();
     let session = create_pipeline_session(state, &root.join("workspace"), std::slice::from_ref(&source_path))?;
@@ -250,6 +269,8 @@ fn legacy_staging_check(app: &AppHandle, state: &AppState, source: &Path, root: 
                 stream.set_nonblocking(false).map_err(|e|e.to_string())?;
                 stream.set_read_timeout(Some(Duration::from_secs(10))).map_err(|e|e.to_string())?;
                 let mut reader = BufReader::new(stream.try_clone().map_err(|e|e.to_string())?);
+                let mut request_line = String::new();
+                reader.read_line(&mut request_line).map_err(|e| e.to_string())?;
                 let mut length = 0;
                 loop {
                     let mut line = String::new();
@@ -260,6 +281,7 @@ fn legacy_staging_check(app: &AppHandle, state: &AppState, source: &Path, root: 
                 if length > 2_000_000 { return Err("模拟模型请求超出限制".into()); }
                 let mut body = vec![0; length];
                 reader.read_exact(&mut body).map_err(|e|e.to_string())?;
+                if reject_unsupported_responses(&request_line, &mut stream)? { continue; }
                 let body: Value = serde_json::from_slice(&body).map_err(|e|e.to_string())?;
                 if !list_session_attachments(state, &session.id)?.iter().all(|a| a.kind != "artifact") { return Err("中间产物进入用户成果栏".into()); }
                 let last = body["messages"].as_array().and_then(|v|v.last()).and_then(|v|v["content"].as_str()).unwrap_or("");
@@ -282,14 +304,14 @@ fn legacy_staging_check(app: &AppHandle, state: &AppState, source: &Path, root: 
                 };
                 let message = if let Some((tool, parameters)) = action {
                     json!({"content":Value::Null,"tool_calls":[{"id":format!("call-{step}"),"type":"function","function":{"name":"dispatch_tool","arguments":json!({"toolId":tool,"summary":"自检执行","parameters":parameters}).to_string()}}]})
-                } else { json!({"content":"协议自检结束"}) };
+                } else { json!({"content":"协议自检结束<｜end▁of▁sentence｜>"}) };
                 let response = json!({"model":"self-check","choices":[{"message":message}]}).to_string();
                 write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",response.len(),response).map_err(|e|e.to_string())?;
                 step += 1;
             }
             Ok(())
         });
-        let result = tauri::async_runtime::block_on(run_agent_turn(&SendAgentMessageRequest {session_id:session.id.clone(),content:"将Word公文排版后修改标题，只交付最后一份DOCX".into(),profile_id:profile_id.clone(),model:"self-check".into(),api_key:Some("isolated-not-a-real-key".into()),allow_model_file_access:true},app,state,&Events,"legacy-staging-check",cancellation.clone()));
+        let result = tauri::async_runtime::block_on(run_agent_turn(&SendAgentMessageRequest {attachment_ids:None,session_id:session.id.clone(),content:"将Word公文排版后修改标题，只交付最后一份DOCX".into(),profile_id:profile_id.clone(),model:"self-check".into(),api_key:Some("isolated-not-a-real-key".into()),allow_model_file_access:true},app,state,&events,"legacy-staging-check",cancellation.clone()));
         stop.store(true, Ordering::SeqCst);
         server.join().map_err(|_|"模拟模型线程失败")??;
         result
@@ -298,11 +320,26 @@ fn legacy_staging_check(app: &AppHandle, state: &AppState, source: &Path, root: 
     let artifacts = list_session_attachments(state, &session.id)?.into_iter().filter(|a|a.kind == "artifact").collect::<Vec<_>>();
     if artifacts.len() != usize::from(mode == "success") || sha256_file(source)? != source_hash { return Err(format!("legacy {mode} 成果数量或原件核验失败")); }
     if mode == "success" {
+        let saved: String = state.db.lock().query_row(
+            "SELECT content FROM agent_messages WHERE session_id=?1 AND role='assistant'",
+            params![session.id], |row| row.get(0)
+        ).map_err(|e| e.to_string())?;
+        if saved != "协议自检结束" || *events.0.lock() != saved {
+            return Err("回复结束标记清理后，显示文字或数据库正文与预期不符".into());
+        }
         let path = PathBuf::from(artifacts[0].local_snapshot_path.as_deref().ok_or("最终成果路径缺失")?);
         let structure = run_word_request(&path,&json!({}),None,&root.join("verify"),&AtomicBool::new(false))?;
         if structure["blocks"][0]["text"] != "兼容接口填写完成" { return Err("legacy没有交付最后的填写成果".into()); }
     }
     Ok(())
+}
+
+/// These fixtures implement only Chat Completions, as a real legacy gateway would.
+fn reject_unsupported_responses(line: &str, stream: &mut std::net::TcpStream) -> Result<bool, String> {
+    if line.split_whitespace().nth(1) != Some("/responses") { return Ok(false); }
+    stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        .map_err(|e| e.to_string())?;
+    Ok(true)
 }
 
 /// Run the application against a bounded, local model-protocol fixture. The
@@ -339,6 +376,8 @@ fn with_design_protocol<T>(
                 stream.set_nonblocking(false).map_err(|e| e.to_string())?;
                 stream.set_read_timeout(Some(Duration::from_secs(5))).map_err(|e| e.to_string())?;
                 let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
+                let mut request_line = String::new();
+                reader.read_line(&mut request_line).map_err(|e| e.to_string())?;
                 let mut length = 0;
                 loop {
                     let mut line = String::new();
@@ -351,6 +390,7 @@ fn with_design_protocol<T>(
                 if length > 2_000_000 { return Err("设计协议请求超出自检限制".into()); }
                 let mut body = vec![0; length];
                 reader.read_exact(&mut body).map_err(|e| e.to_string())?;
+                if reject_unsupported_responses(&request_line, &mut stream)? { continue; }
                 let body: Value = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
                 let index = requests.lock().len();
                 requests.lock().push(body);
@@ -1028,7 +1068,7 @@ fn check_codex_loopback(app: &AppHandle, state: &AppState, root: &Path, source: 
         ("harness-resume", "继续上一线程，仅查询 extract_pdf_text 能力的输入输出格式，不生成文件。协议验收第二轮。"),
     ] {
         run_codex_agent_turn(&SendAgentMessageRequest {
-            session_id:session.id.clone(), content:content.into(), profile_id:id.into(),
+            attachment_ids:None,session_id:session.id.clone(), content:content.into(), profile_id:id.into(),
             model:"deepseek-self-check".into(), api_key:Some("isolated-not-a-real-key".into()),
             allow_model_file_access:true,
         }, app, state, &Events, turn, Arc::new(AtomicBool::new(false)))?;
@@ -1051,7 +1091,7 @@ fn check_codex_loopback(app: &AppHandle, state: &AppState, root: &Path, source: 
     }
     let mut cancellation_proof = Value::Null;
     if std::env::var("ZHAI_SELF_CHECK_HARNESS_CANCEL").as_deref() == Ok("1") {
-        let marker = PathBuf::from(&session.workspace_path).join("cancel-pids.txt");
+        let marker = PathBuf::from(&session.workspace_path).join("runs/harness-cancel/scratch/shell/cancel-pids.txt");
         let cancellation = Arc::new(AtomicBool::new(false));
         let stopped = AtomicBool::new(false);
         let observed_children = Mutex::new(Vec::<i32>::new());
@@ -1086,7 +1126,7 @@ fn check_codex_loopback(app: &AppHandle, state: &AppState, root: &Path, source: 
                 cancellation.store(true, Ordering::SeqCst);
             });
             let result = run_codex_agent_turn(&SendAgentMessageRequest {
-                session_id:session.id.clone(), content:"协议取消验收：运行测试子进程，等待外部取消，不生成成果。".into(),
+                attachment_ids:None,session_id:session.id.clone(), content:"协议取消验收：运行测试子进程，等待外部取消，不生成成果。".into(),
                 profile_id:id.into(), model:"deepseek-self-check".into(), api_key:Some("isolated-not-a-real-key".into()), allow_model_file_access:true,
             }, app, state, &Events, "harness-cancel", cancellation.clone());
             stopped.store(true, Ordering::SeqCst);
@@ -1287,18 +1327,8 @@ pub(super) fn online(app: &AppHandle, root: &Path) -> Result<Value, String> {
     };
     let mut report = run(app, root)?;
     eprintln!("离线自检通过，开始真实 DeepSeek 聊天请求");
-    let source = Connection::open_with_flags(
-        app_data_directory(app)?.join("history.sqlite3"),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .map_err(|e| e.to_string())?;
-    let (id, name, url, model): (String,String,String,String) = source.query_row(
-        "SELECT id,display_name,base_url,default_model FROM ai_profiles WHERE provider='deepseek' AND key_stored=1 ORDER BY last_test_success DESC,id LIMIT 1", [],
-        |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
-    ).map_err(|_|"没有可供联网自检的已保存 DeepSeek 配置")?;
-    drop(source);
     let state = AppState::open(root.join("online-data"))?;
-    state.db.lock().execute("INSERT INTO ai_profiles(id,provider,display_name,base_url,default_model,key_stored) VALUES(?1,'deepseek',?2,?3,?4,1)",params![id,name,url,model]).map_err(|e|e.to_string())?;
+    let (id, model) = copy_online_profile(app, &state, session_key.is_some())?;
     let session = create_pipeline_session(&state, &root.join("online-chat"), &[])?;
     let make_request = |session_id: String, content: &str, access: bool| SendAgentMessageRequest {
         session_id,
@@ -1307,6 +1337,7 @@ pub(super) fn online(app: &AppHandle, root: &Path) -> Result<Value, String> {
         model: model.clone(),
         api_key: session_key.clone(),
         allow_model_file_access: access,
+        attachment_ids: None,
     };
     tauri::async_runtime::block_on(send_agent_message_inner(
         make_request(

@@ -9,16 +9,16 @@ Work inside the writable capability package supplied by zhai. Treat built-in cap
 
 ## Workflow
 
-1. Inspect `skill.json`, `SKILL.md`, `scripts/`, `references/`, `assets/`, and `tests/` when present.
-2. Read [skill-package-schema.md](references/skill-package-schema.md) before changing the execution contract.
-3. Read [office-capabilities.md](references/office-capabilities.md) when choosing a parent skill, input format, or pipeline stage.
+1. Start from the supplied contract. Read only the sample header, code, or parent declaration needed for this request, preferably in one tool call. Make a concrete edit to the package as soon as the inputs and output are known.
+2. Write the minimal working implementation and contract first. Consult [skill-package-schema.md](references/skill-package-schema.md) for individual fields or composition syntax when needed.
+3. Consult [office-capabilities.md](references/office-capabilities.md) when selecting a parent or composing a pipeline stage.
    For 公文排版、套红 or 版记, also read [official-document-format.md](references/official-document-format.md). Prefer the published `apply_redhead` capability for letterhead composition.
 4. Preserve the existing package ID and parent relationship unless the user explicitly asks for a new package.
 5. Prefer a derived composition when the request modifies an existing mature capability. Keep built-in parent capabilities unchanged. First inspect the parent's declared parameters: when the requested change is already supported, create a one-stage derived package that only configures the parent. Do not add a placeholder or pass-through Python stage.
 6. Add `scripts/main.py` only when the requested transformation cannot be expressed by mature capability parameters. Use `python3`; expose `run(context, params)`, open the previous-stage files from `context.inputs`, write new files under `context.output_dir`, and return those new paths in `outputs`.
 7. Add or update `tests/cases.json`. Copy only the fixtures zhai placed in `tests/fixtures/`; never read other paths.
 8. Declare `requiresNetwork` truthfully: deterministic local transformations are offline; workflows that need a model or external service on every reuse are online. Include `network` in permissions and explain the service dependency in the description. The model used to design a package does not itself make that package online. The current custom-script executor denies network access: an online declaration is a preserved draft, not permission to bypass the sandbox or a claim it can run.
-9. Run `python3 "$ZHAI_DESIGNER_SKILL/scripts/validate_package.py" .`. This is structural validation only. zhai saves the draft, then runs selected sample inputs with the packaged production sidecar. A shell Python interpreter may not have the sidecar's dependencies. Do not invent a test command or claim sample execution passed without the executor's result.
+9. Run `python3 "$ZHAI_DESIGNER_SKILL/scripts/validate_package.py" .` after writing the files. This checker uses the standard library. zhai's production sidecar includes openpyxl, python-docx, docxcompose, pypdf, pdfplumber, reportlab and lxml and runs selected samples after design. Write code against those embedded libraries directly. Testing their imports or installing them in the host shell gives no information about the sidecar.
 10. When zhai supplies a real sample failure, repair the existing package once using the error and the exact parameters; do not change its ID, discard features, weaken acceptance, or return fabricated artifacts. The application reruns the same sample and parameters. If business input is missing, report that explicitly rather than guessing or editing the implementation to accept invalid input.
 
 ## Sample and parameter contract

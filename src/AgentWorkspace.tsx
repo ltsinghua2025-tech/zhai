@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { onFileDrop, openDialog as open, randomId } from "./lib/tauriCompat";
+import { onFileDrop, openDialog as open, randomId, releaseWebSelection } from "./lib/tauriCompat";
 import {
   ArrowLeft,
   ArrowUp,
@@ -65,6 +65,7 @@ import type {
 import MarkdownMessage from "./MarkdownMessage";
 import { SkillTestPanel, skillInputExtensions, skillInputProblem } from "./SkillTestPanel";
 import { artifactsForMessage } from "./lib/messageArtifacts";
+import { webTurnMaterials } from "./lib/turnMaterials";
 import shellAvatar from "./assets/zhai-shell-avatar.png";
 import { isWebApiEnabled } from "./lib/webApi";
 
@@ -190,10 +191,16 @@ export default function AgentWorkspace({ active = true, profile, apiKey, openMod
   const [sessions, setSessions] = useState<AgentSession[]>([]);
   const [activeId, setActiveId] = useState<string>();
   const [detail, setDetail] = useState<AgentSessionDetail>();
+  const [fileSelection, setFileSelection] = useState<{sessionId: string; ids: string[]}>();
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState("");
   const [liveRuns, setLiveRuns] = useState<AgentToolRun[]>([]);
   const [busy, setBusy] = useState(false);
+  const [importStatus, setImportStatus] = useState<string>();
+  const pickerSequence = useRef(0);
+  const uploadRef = useRef<AbortController | null>(null);
+  const [runningTurn, setRunningTurn] = useState(false);
+  const [turnAccepted, setTurnAccepted] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
   const [urlInput, setUrlInput] = useState("");
@@ -226,9 +233,12 @@ export default function AgentWorkspace({ active = true, profile, apiKey, openMod
   const [sourceTask, setSourceTask] = useState<SkillDesignState["sourceTask"]>();
   const [sourceContext, setSourceContext] = useState<string>();
   const designRunIdRef = useRef<string | undefined>(undefined);
+  const cancelledDesignRun = useRef<string | undefined>(undefined);
+  const registeredDesignRun = useRef<string | undefined>(undefined);
   const designSaveQueue = useRef<Promise<unknown>>(Promise.resolve());
   const booted = useRef(false);
   const consumedTarget = useRef<string | undefined>(undefined);
+  const chatTurn = useRef<{ sessionId?: string; turnId?: string; stopRequested: boolean } | null>(null);
   const busyRef = useRef(false);
   busyRef.current = busy;
   const dropEnabledRef = useRef(false);
@@ -278,14 +288,14 @@ export default function AgentWorkspace({ active = true, profile, apiKey, openMod
     setTurnModel(profile?.defaultModel || "");
   }, [profile?.id, profile?.defaultModel]);
 
-  const refreshSessions = async (preferId?: string) => {
-    const items = await listAgentSessions();
+  const refreshSessions = async (preferId?: string, signal?: AbortSignal) => {
+    const items = await listAgentSessions(signal);
     sessionsRef.current = items;
     setSessions(items);
     const nextId = preferId || activeIdRef.current || items[0]?.id;
     activeIdRef.current = nextId;
     setActiveId(nextId);
-    if (nextId) setDetail(await getAgentSession(nextId));
+    if (nextId) setDetail(await getAgentSession(nextId, signal));
     else setDetail(undefined);
   };
 
@@ -413,7 +423,7 @@ export default function AgentWorkspace({ active = true, profile, apiKey, openMod
     let disposed = false;
     let cleanup: (() => void) | undefined;
     onFileDrop(async (paths) => {
-          if (!dropEnabledRef.current || busyRef.current || creatingNewRef.current) return;
+          if (!paths.length || !dropEnabledRef.current || busyRef.current || creatingNewRef.current) return;
           busyRef.current = true;
           setBusy(true);
           setError(undefined);
@@ -428,6 +438,11 @@ export default function AgentWorkspace({ active = true, profile, apiKey, openMod
               })),
               designModeRef.current,
             );
+            if (!designModeRef.current && added.length) {
+              setFileSelection(current => current?.sessionId === session.id
+                ? { sessionId: session.id, ids: [...new Set([...current.ids, ...added.map(item => item.id)])] }
+                : current);
+            }
             await refreshSessions(session.id);
             reportMaterialImport(added);
           } catch (reason) {
@@ -446,12 +461,12 @@ export default function AgentWorkspace({ active = true, profile, apiKey, openMod
     };
   }, []);
 
-  const ensureSession = async () => {
+  const ensureSession = async (signal?: AbortSignal) => {
     const currentId = activeIdRef.current;
     if (currentId)
       return (
         sessionsRef.current.find((item) => item.id === currentId) ||
-        (await getAgentSession(currentId)).session
+        (await getAgentSession(currentId, signal)).session
       );
     if (sessionCreationRef.current) return sessionCreationRef.current;
     const currentProfile = profileRef.current;
@@ -460,12 +475,12 @@ export default function AgentWorkspace({ active = true, profile, apiKey, openMod
       const created = await createAgentSession({
         profileId: currentProfile.id,
         model: turnModelRef.current || currentProfile.defaultModel,
-      });
+      }, signal);
       activeIdRef.current = created.id;
       sessionsRef.current = [created, ...sessionsRef.current.filter((item) => item.id !== created.id)];
       setSessions(sessionsRef.current);
       setActiveId(created.id);
-      setDetail(await getAgentSession(created.id));
+      setDetail(await getAgentSession(created.id, signal));
       return created;
     })();
     sessionCreationRef.current = creation;
@@ -518,56 +533,76 @@ export default function AgentWorkspace({ active = true, profile, apiKey, openMod
     }
   }
 
-  const addFiles = async (asTestSample = false) => {
+  const chooseMaterials = async (folder: boolean, specialRole = false) => {
     if (busyRef.current || loading) return;
-    busyRef.current = true; setBusy(true); setError(undefined); setNotice(undefined);
+    const selectionId = ++pickerSequence.current;
+    const sessionBefore = activeIdRef.current;
+    const designing = designModeRef.current;
+    let paths: string[] = [];
+    let uploading = false;
+    let sessionId: string | undefined;
+    const controller = new AbortController();
+    let timer: number | undefined;
+    let timedOut = false;
+    const onFile = (name: string) => {
+      setImportStatus(webMode ? `正在上传 ${name}` : `正在添加 ${name}`);
+      if (!webMode) return;
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => { timedOut = true; controller.abort(); }, 120_000);
+    };
     try {
-    const selection = await open({
-      directory: false,
-      multiple: true,
-      title: asTestSample ? "添加原始测试样本" : "添加文件到当前会话",
-      filters: [{ name: "办公材料", extensions: asTestSample && skillDraft ? skillInputExtensions(skillDraft) : supportedExtensions }],
-    });
-    const paths = Array.isArray(selection)
-      ? selection
-      : typeof selection === "string"
-        ? [selection]
-        : [];
-    if (paths.length === 0) return;
-    const session = await ensureSession();
-    const added = await addAgentAttachments(
-      session.id,
-      paths.map((path) => ({ kind: "file", path })),
-      workspaceMode === "skill",
-    );
-    await refreshSessions(session.id);
-    reportMaterialImport(added);
-    } catch (reason) { setError(`添加文件失败：${String(reason)}`); }
-    finally { busyRef.current = false; setBusy(false); }
+      const selection = await open({
+        directory: folder, multiple: !folder,
+        title: folder ? "添加文件夹到当前会话" : specialRole ? "添加原始测试样本" : "添加文件到当前会话",
+        filters: folder ? undefined : [{ name: "办公材料", extensions: specialRole && skillDraft ? skillInputExtensions(skillDraft) : supportedExtensions }],
+      });
+      paths = typeof selection === "string" ? [selection] : selection || [];
+      if (!paths.length || selectionId !== pickerSequence.current || sessionBefore !== activeIdRef.current ||
+          designing !== designModeRef.current || busyRef.current) return;
+      uploading = true;
+      busyRef.current = true; setBusy(true); setError(undefined); setNotice(undefined);
+      if (webMode) uploadRef.current = controller;
+      setImportStatus(folder ? "正在添加文件夹" : "正在添加文件");
+      const session = await ensureSession(controller.signal);
+      sessionId = session.id;
+      if (controller.signal.aborted) throw new Error("已取消上传");
+      const items = paths.map(path => folder ? { kind: "folder" as const, path } : { kind: "file" as const, path });
+      const added = webMode
+        ? await addAgentAttachments(session.id, items, designing, { signal: controller.signal, onFile })
+        : await addAgentAttachments(session.id, items, designing);
+      if (!designing && added.length) {
+        setFileSelection(current => {
+          const base = current?.sessionId === session.id ? current.ids : turnMaterials.fresh;
+          return { sessionId: session.id, ids: [...new Set([...base, ...added.map(item => item.id)])] };
+        });
+      }
+      if (folder && specialRole && added.length) {
+        setSkillAttachmentRoles(current => ({ ...current, ...Object.fromEntries(added.map(item => [item.id, "reference" as const])) }));
+      }
+      await refreshSessions(session.id, controller.signal);
+      reportMaterialImport(added);
+    } catch (reason) {
+      if (timedOut) setError("上传超时，请检查网络后重试。");
+      else if (controller.signal.aborted) setNotice("已取消上传。");
+      else setError(`添加${folder ? "文件夹" : "文件"}失败：${String(reason)}`);
+      if (webMode && sessionId) {
+        const targetSession = sessionId;
+        void getAgentSession(targetSession).then(current => {
+          if (activeIdRef.current === targetSession && pickerSequence.current === selectionId && !busyRef.current) setDetail(current);
+        }).catch(() => {});
+      }
+    } finally {
+      window.clearTimeout(timer);
+      if (webMode) paths.forEach(releaseWebSelection);
+      if (uploading) {
+        uploadRef.current = null; setImportStatus(undefined);
+        busyRef.current = false; setBusy(false);
+      }
+    }
   };
 
-  const addFolder = async (asReference = false) => {
-    if (busyRef.current || loading) return;
-    busyRef.current = true; setBusy(true); setError(undefined); setNotice(undefined);
-    try {
-    const selection = await open({
-      directory: true,
-      multiple: false,
-      title: "添加文件夹到当前会话",
-    });
-    if (typeof selection !== "string") return;
-    const session = await ensureSession();
-    const added = await addAgentAttachments(session.id, [
-      { kind: "folder", path: selection },
-    ], workspaceMode === "skill");
-    if (asReference && added.length) {
-      setSkillAttachmentRoles(current => ({ ...current, ...Object.fromEntries(added.map(item => [item.id, "reference" as const])) }));
-    }
-    await refreshSessions(session.id);
-    reportMaterialImport(added);
-    } catch (reason) { setError(`添加文件夹失败：${String(reason)}`); }
-    finally { busyRef.current = false; setBusy(false); }
-  };
+  const addFiles = (asTestSample = false) => chooseMaterials(false, asTestSample);
+  const addFolder = (asReference = false) => chooseMaterials(true, asReference);
 
   const addUrl = async () => {
     if (busyRef.current || loading) return;
@@ -578,9 +613,14 @@ export default function AgentWorkspace({ active = true, profile, apiKey, openMod
     busyRef.current = true; setBusy(true);
     try {
     const session = await ensureSession();
-    await addAgentAttachments(session.id, [
+    const added = await addAgentAttachments(session.id, [
       { kind: "url", url: urlInput.trim() },
     ]);
+    if (!designModeRef.current && added.length) {
+      setFileSelection(current => ({ sessionId: session.id, ids: [...new Set([
+        ...(current?.sessionId === session.id ? current.ids : turnMaterials.fresh), ...added.map(item => item.id),
+      ])] }));
+    }
     setUrlInput("");
     setShowUrl(false);
     setError(undefined);
@@ -612,6 +652,13 @@ export default function AgentWorkspace({ active = true, profile, apiKey, openMod
 
   const onAgentEvent = (event: AgentEvent) => {
     if (event.sessionId !== activeIdRef.current) return;
+    setFileSelection(undefined);
+    const turn = chatTurn.current;
+    if (!webMode && turn?.sessionId === event.sessionId && !turn.turnId) {
+      turn.turnId = event.turnId;
+      if (turn.stopRequested) void stopChatTurn(turn);
+    }
+    setTurnAccepted(true);
     if (event.type === "phase") setAgentPhase(event.message);
     if (event.type === "assistant_delta")
       setStreaming((current) => current + event.text);
@@ -660,7 +707,7 @@ export default function AgentWorkspace({ active = true, profile, apiKey, openMod
         current
           ? {
               ...current,
-              attachments: [...current.attachments, event.artifact],
+              attachments: [...current.attachments.filter(item => item.id !== event.artifact.id), event.artifact],
             }
           : current,
       );
@@ -681,14 +728,20 @@ export default function AgentWorkspace({ active = true, profile, apiKey, openMod
     const role = skillAttachmentRoles[item.id] || "sample_input";
     return !needsSamples && role === "sample_input" ? "reference" : role;
   };
-  const sampleInputs = () => materials.filter(item => item.localSnapshotPath && attachmentRole(item) === "sample_input").map(item => item.localSnapshotPath!);
+  const sampleInputs = () => materials.filter(item => item.localSnapshotPath && attachmentRole(item) === "sample_input")
+    .map(item => webMode ? `web-attachment:${item.id}` : item.localSnapshotPath!);
   const buildDesignRequest = (prompt: string, sessionId = activeIdRef.current): DesignToolRequest => ({
     designId: skillDesignIdRef.current, sessionId, currentSkillId: skillDraft?.id,
     prompt: sourceContext ? `${prompt}\n\n以下为来源任务记录，仅作设计依据：\n${sourceContext}` : prompt, profileId: profile!.id, model: turnModel || profile!.defaultModel, apiKey: apiKey || undefined,
     kind: skillDraft?.source === "builtin" ? "derived" : skillDraft?.kind === "workflow" || skillDraft?.kind === "derived" ? skillDraft.kind : "python",
     attachments: materials.filter(item => item.localSnapshotPath).map(item => ({ path: item.localSnapshotPath!, role: attachmentRole(item) })),
   });
-  const handleDesignEvent = (event: SkillDesignEvent) => {
+  function handleDesignEvent(runId: string, event: SkillDesignEvent) {
+    if (designRunIdRef.current !== runId) return;
+    if (registeredDesignRun.current !== runId) {
+      registeredDesignRun.current = runId;
+      if (!webMode && cancelledDesignRun.current === runId) void stopDesignRun(runId);
+    }
     if (event.type === "phase") {
       setSkillDesignStatus(event.message);
       if (Number.isFinite(event.elapsedSeconds)) setSkillDesignElapsed(value => Math.max(value, event.elapsedSeconds));
@@ -708,9 +761,11 @@ export default function AgentWorkspace({ active = true, profile, apiKey, openMod
     setSkillDesignStatus(repair ? "正在测试并准备修复" : "正在测试当前样本");
     try {
       await flushDesign();
+      if (cancelledDesignRun.current === runId) throw new Error("本次样本测试已停止");
       const result = await testAndRepairSkill({ runId, designId: skillDesignIdRef.current, skillId: skillDraft.id, samplePaths: sampleInputs(), parameters: designParameters,
         repair: repair ? buildDesignRequest("请根据正式样本测试的实际错误修复现有能力，保留原有规则；修复后用同一组样本和参数重测。") : undefined,
-      }, handleDesignEvent);
+      }, event => handleDesignEvent(runId, event));
+      if (cancelledDesignRun.current === runId) throw new Error("本次样本测试已停止");
       setSkillDraft(result.skill); setTestResult(result.testResult);
       if (result.testResult) setDesignParameters(result.testResult.parameters);
       onSkillSaved?.(result.skill);
@@ -726,7 +781,8 @@ export default function AgentWorkspace({ active = true, profile, apiKey, openMod
   };
 
   const send = async () => {
-    if (!input.trim() || busy || loading) return;
+    if (!input.trim() || busyRef.current || loading) return;
+    ++pickerSequence.current;
     setNotice(undefined);
     setStopping(false);
     setAgentPhase(undefined);
@@ -740,9 +796,12 @@ export default function AgentWorkspace({ active = true, profile, apiKey, openMod
       setBusy(true);
       setError(undefined);
       const userText = input.trim();
+      const runId = randomId();
+      designRunIdRef.current = runId;
       const messages: SkillDesignState["messages"] = [...skillMessages, { role: "user", content: userText }];
       try {
         const session = await ensureSession();
+        if (cancelledDesignRun.current === runId) return;
         const designId = skillDesignIdRef.current || randomId();
         skillDesignIdRef.current = designId;
         setInput("");
@@ -756,18 +815,18 @@ export default function AgentWorkspace({ active = true, profile, apiKey, openMod
           setDesignSessionId(session.id);
           return;
         }
-        const runId = randomId();
-        designRunIdRef.current = runId;
         setSkillMessages(messages);
         setSkillDesignElapsed(0);
         setTestResult(undefined);
         setSkillDesignStatus("正在准备能力包设计");
         await queueDesignSave(session.id, { ...designSnapshot(), designId, messages, testResult: undefined });
         setDesignSessionId(session.id);
+        if (cancelledDesignRun.current === runId) throw new Error("本次能力包设计已停止");
         const result = await designAndTestSkill({
           design: buildDesignRequest(userText, session.id), runId,
           samplePaths: sampleInputs(), parameters: designParameters, autoTest: true,
-        }, handleDesignEvent);
+        }, event => handleDesignEvent(runId, event));
+        if (cancelledDesignRun.current === runId) throw new Error("本次能力包设计已停止");
         setSkillDraft(result.skill);
         setTestResult(result.testResult);
         setDesignParameters(result.testResult?.parameters || Object.fromEntries(result.skill.parameters.filter(p => p.defaultValue !== undefined).map(p => [p.key, p.defaultValue])));
@@ -790,13 +849,20 @@ export default function AgentWorkspace({ active = true, profile, apiKey, openMod
       }
       return;
     }
+    busyRef.current = true;
     setBusy(true);
+    const turn: NonNullable<typeof chatTurn.current> = { stopRequested: false };
+    chatTurn.current = turn;
+    setRunningTurn(true);
+    setTurnAccepted(false);
     setShowProcess(true);
     setError(undefined);
     setStreaming("");
     setLiveRuns([]);
     try {
       const session = await ensureSession();
+      if (turn.stopRequested) return;
+      turn.sessionId = session.id;
       const userText = input.trim();
       setInput("");
       setDetail((current) =>
@@ -811,6 +877,7 @@ export default function AgentWorkspace({ active = true, profile, apiKey, openMod
                   role: "user",
                   content: userText,
                   createdAt: new Date().toISOString(),
+                  attachmentIds: turnMaterials.ids,
                 },
               ],
             }
@@ -825,10 +892,12 @@ export default function AgentWorkspace({ active = true, profile, apiKey, openMod
           baseUrl: profile.baseUrl,
           apiKey: apiKey || undefined,
           allowModelFileAccess,
+          attachmentIds: turnMaterials.ids,
         },
         onAgentEvent,
       );
       setDetail(result);
+      setFileSelection(undefined);
       setStreaming("");
       setLiveRuns([]);
       await refreshSessions(session.id);
@@ -839,6 +908,10 @@ export default function AgentWorkspace({ active = true, profile, apiKey, openMod
         setDetail(await getAgentSession(activeId).catch(() => detail));
     } finally {
       setBusy(false);
+      busyRef.current = false;
+      chatTurn.current = null;
+      setRunningTurn(false);
+      setTurnAccepted(false);
       setStopping(false);
       setAgentPhase(undefined);
     }
@@ -879,15 +952,40 @@ export default function AgentWorkspace({ active = true, profile, apiKey, openMod
     } finally { busyRef.current = false; setBusy(false); }
   };
 
+  async function stopChatTurn(turn: NonNullable<typeof chatTurn.current>) {
+    if (!turn.sessionId || !turn.turnId) return;
+    try { await cancelAgentTurn(turn.sessionId, turn.turnId); }
+    catch (reason) {
+      if (chatTurn.current === turn) {
+        turn.stopRequested = false;
+        setStopping(false);
+        setError(`无法停止任务：${String(reason)}`);
+      }
+    }
+  }
+
+  async function stopDesignRun(runId: string) {
+    try { await cancelSkillDesign(runId); }
+    catch (reason) {
+      if (designRunIdRef.current !== runId) return;
+      cancelledDesignRun.current = undefined;
+      setStopping(false);
+      setError(`无法停止能力设计：${String(reason)}`);
+    }
+  }
+
   const stop = async () => {
     setStopping(true);
     if (workspaceMode === "skill" && designRunIdRef.current) {
-      try {
-        await cancelSkillDesign(designRunIdRef.current!);
-      } catch (reason) {
-        setStopping(false);
-        setError(`无法停止能力设计：${String(reason)}`);
-      }
+      const runId = designRunIdRef.current;
+      cancelledDesignRun.current = runId;
+      if (webMode || registeredDesignRun.current === runId) await stopDesignRun(runId);
+      return;
+    }
+    const turn = chatTurn.current;
+    if (!webMode && turn) {
+      turn.stopRequested = true;
+      await stopChatTurn(turn);
       return;
     }
     if (!activeId) return;
@@ -982,7 +1080,20 @@ export default function AgentWorkspace({ active = true, profile, apiKey, openMod
     () => detail?.attachments.filter((item) => item.kind !== "artifact") ?? [],
     [detail?.attachments],
   );
-  const sampleLabels = useMemo(() => Object.fromEntries(materials.flatMap(item => item.localSnapshotPath ? [[item.localSnapshotPath, item.name]] : [])), [materials]);
+  const explicitIds = fileSelection?.sessionId === activeId ? fileSelection?.ids : undefined;
+  const turnMaterials = webTurnMaterials(materials, detail?.messages || [], explicitIds);
+  const turnMaterialSelection = workspaceMode === "files";
+  const selectMaterials = (ids: string[]) => {
+    if (activeId) setFileSelection({ sessionId: activeId, ids });
+  };
+  const materialChoice = (item: AgentAttachment) => <label key={item.id}>
+    <input type="checkbox" disabled={busy} aria-label={`本轮使用 ${item.relativePath || item.name}`}
+      checked={turnMaterials.ids.includes(item.id)}
+      onChange={event => selectMaterials(event.target.checked ? [...turnMaterials.ids, item.id] : turnMaterials.ids.filter(id => id !== item.id))} />
+    {item.relativePath || item.name}
+  </label>;
+  const sampleLabels = useMemo(() => Object.fromEntries(materials.flatMap(item => item.localSnapshotPath
+    ? [[webMode ? `web-attachment:${item.id}` : item.localSnapshotPath, item.name]] : [])), [materials, webMode]);
   const materialGroups = useMemo(() => {
     const groups = new Map<string, AgentAttachment[]>();
     for (const item of materials) {
@@ -1017,12 +1128,35 @@ export default function AgentWorkspace({ active = true, profile, apiKey, openMod
       return {
         key,
         kind: "folder",
-        name: first.sourceGroupName || "历史文件夹材料",
+        name: first.relativePath?.includes("/") && webMode ? first.relativePath.split("/")[0] : first.sourceGroupName || "历史文件夹材料",
         items,
         summary: `${items.length} 个文件 · ${formatBytes(items.reduce((sum, item) => sum + (item.size || 0), 0))}${formatSummary ? ` · ${formatSummary}` : ""}`,
       };
     });
-  }, [materials]);
+  }, [materials, webMode]);
+  const sentMaterials = useMemo(() => {
+    const byMessage = new Map<string, MaterialGroup[]>();
+    const sent = new Set<string>();
+    const userMessages = detail?.messages.filter(message => message.role === "user" && !message.id.startsWith("pending-")) ?? [];
+    for (const group of materialGroups) {
+      if (workspaceMode !== "files") continue;
+      const created = Date.parse(group.items[0].createdAt);
+      const legacyOwner = userMessages.find(message => Date.parse(message.createdAt) >= created);
+      for (const message of userMessages) {
+        const used = message.attachmentIds
+          ? group.items.filter(item => message.attachmentIds!.includes(item.id))
+          : message === legacyOwner ? group.items : [];
+        if (!used.length) continue;
+        byMessage.set(message.id, [...(byMessage.get(message.id) ?? []), { ...group, items: used }]);
+        sent.add(group.key);
+      }
+    }
+    return { byMessage, sent };
+  }, [detail?.messages, materialGroups, workspaceMode]);
+  const composerGroups = turnMaterialSelection
+    ? materialGroups.map(group => ({ ...group, items: group.items.filter(item => (explicitIds || turnMaterials.fresh).includes(item.id)) }))
+        .filter(group => group.items.length)
+    : materialGroups.filter(group => !sentMaterials.sent.has(group.key));
   const latestPersistedTurnId = useMemo(
     () =>
       [...(detail?.messages ?? [])]
@@ -1118,7 +1252,7 @@ export default function AgentWorkspace({ active = true, profile, apiKey, openMod
             <button disabled={busy || loading} className={workspaceMode === "files" ? "is-active" : ""} onClick={() => void changeMode("files")}>{workspaceMode === "skill" && <ArrowLeft size={13} />}处理材料</button>
             <button disabled={busy || loading} className={workspaceMode === "skill" ? "is-active" : ""} onClick={() => void changeMode("skill")}><Code size={14} />设计能力包</button>
           </div>
-          <button className={profile && (apiKey.trim() || profile.keyStored) ? "model-ready" : ""} onClick={openModels}>
+          {!profile?.managed && <button className={profile && (apiKey.trim() || profile.keyStored) ? "model-ready" : ""} onClick={openModels}>
             <Cloud size={15} />
             {!profile
               ? "配置模型"
@@ -1127,7 +1261,7 @@ export default function AgentWorkspace({ active = true, profile, apiKey, openMod
                   ? "模型已就绪"
                   : "密钥已设置"
                 : "需要 API Key"}
-          </button>
+          </button>}
           {workspaceMode === "files" && (
             <button className="context-toggle" onClick={() => setContextOpen((value) => !value)} title={contextOpen ? "收起材料栏" : "展开材料栏"}>
               <SidebarSimple size={15} />
@@ -1179,6 +1313,7 @@ export default function AgentWorkspace({ active = true, profile, apiKey, openMod
                 </span>
                 <div>
                   {message.role === "assistant" ? <MarkdownMessage>{message.content}</MarkdownMessage> : <p>{message.content}</p>}
+                  {sentMaterials.byMessage.get(message.id)?.map(group => <small key={group.key}><Paperclip size={12} /> {group.name}</small>)}
                   {message.role === "assistant" && artifactsForMessage(message, detail.messages, artifactGroups).map((group) => (
                     <div className="message-artifacts" key={group.key}>
                       {group.items.length > 1 && <strong>{group.name} · {group.items.length} 个文件</strong>}
@@ -1245,12 +1380,12 @@ export default function AgentWorkspace({ active = true, profile, apiKey, openMod
               </div>
             </article>
           )}
-          {busy && !streaming && (
+          {busy && !streaming && (importStatus || runningTurn || skillDesignStatus) && (
             <div className="thinking-line">
               <span />
               <span />
               <span />
-              <small>{stopping ? "正在停止任务，等待后台退出…" : workspaceMode === "skill" ? skillDesignProgress || "正在设计能力包" : agentPhase || "正在准备本轮任务"}</small>
+              <small>{importStatus || (stopping ? "正在停止任务，等待后台退出…" : skillDesignProgress || agentPhase || "正在准备本轮任务")}</small>
             </div>
           )}
         </div>
@@ -1271,14 +1406,16 @@ export default function AgentWorkspace({ active = true, profile, apiKey, openMod
               </button>
             </div>
           )}
-          {materialGroups.length > 0 && (
+          {composerGroups.length > 0 && (
             <div className="composer-materials">
-              {materialGroups.slice(-6).map((group) => (
+              {composerGroups.map((group) => (
                 <span key={group.key} title={group.summary}>
                   {group.kind === "folder" ? <FolderOpen size={13} /> : iconForAttachment(group.items[0])}
                   <b>{group.name}</b>
                   {group.items.length > 1 && <i>{group.items.length}</i>}
-                  <button disabled={busy} onClick={() => removeMaterialGroup(group)}>
+                  <button disabled={busy} aria-label={turnMaterialSelection ? `本轮移除 ${group.name}` : undefined} onClick={() => turnMaterialSelection
+                    ? selectMaterials(turnMaterials.ids.filter(id => !group.items.some(item => item.id === id)))
+                    : removeMaterialGroup(group)}>
                     <X size={11} />
                   </button>
                 </span>
@@ -1289,7 +1426,8 @@ export default function AgentWorkspace({ active = true, profile, apiKey, openMod
             <div className="skill-material-roles">
               <span>告诉 Agent 每份材料的用途</span>
               <div>
-                {materials.map((item) => (
+                {materialGroups.map(group => {
+                  const roles = group.items.map(item => (
                   <label key={item.id} title={item.name}>
                     <b>{item.name}</b>
                     <select disabled={busy}
@@ -1305,10 +1443,23 @@ export default function AgentWorkspace({ active = true, profile, apiKey, openMod
                       <option value="reference">参考材料</option>
                     </select>
                   </label>
-                ))}
+                  ));
+                  return group.kind === "folder"
+                    ? <details key={group.key}><summary>{group.name} · {group.items.length} 个文件</summary>{roles}</details>
+                    : roles;
+                })}
               </div>
             </div>
           )}
+          {turnMaterialSelection && !!materials.length && <details className="turn-file-selection">
+            <summary>本轮材料（{turnMaterials.ids.length}）</summary>
+            <div>
+              <button type="button" disabled={busy} onClick={() => selectMaterials(materials.map(item => item.id))}>本轮全选</button>
+              {materialGroups.map(group => group.kind === "folder"
+                ? <details key={group.key}><summary>{group.name} · {group.items.length} 份</summary>{group.items.map(materialChoice)}</details>
+                : group.items.map(materialChoice))}
+            </div>
+          </details>}
           <div className="composer">
             <div className="attach-menu">
               <button disabled={busy} onClick={() => void addFiles()} title="添加文件">
@@ -1317,12 +1468,12 @@ export default function AgentWorkspace({ active = true, profile, apiKey, openMod
               <button disabled={busy} onClick={() => void addFolder()} title="添加文件夹">
                 <FolderOpen size={17} />
               </button>
-              <button
+              {!profile?.managed && <button
                 onClick={() => setShowUrl((value) => !value)}
                 title="添加网址"
               >
                 <Globe size={17} />
-              </button>
+              </button>}
             </div>
             <textarea
               value={input}
@@ -1344,15 +1495,17 @@ export default function AgentWorkspace({ active = true, profile, apiKey, openMod
                   : webMode ? "直接聊天，或先上传需要处理的文件" : "可以直接聊天、讨论思路，也可以创建或处理文件"
               }
             />
-            {busy ? (
-              <button className="stop-send" onClick={stop} aria-label="停止任务">
+            {importStatus && webMode ? (
+              <button className="stop-send" onClick={() => uploadRef.current?.abort()} aria-label="取消上传" title="取消上传"><X size={14} /></button>
+            ) : busy && (runningTurn || designRunIdRef.current) ? (
+              <button className="stop-send" disabled={stopping || (runningTurn && webMode && !turnAccepted)} onClick={stop} aria-label="停止任务">
                 <Stop size={14} weight="fill" />
               </button>
             ) : (
               <button
                 className="send-button"
                 aria-label="发送消息"
-                disabled={!input.trim() || loading}
+                disabled={!input.trim() || loading || busy}
                 onClick={send}
               >
                 <ArrowUp size={16} weight="bold" />
@@ -1413,6 +1566,7 @@ export default function AgentWorkspace({ active = true, profile, apiKey, openMod
                     <strong>{group.name}</strong>
                     <small>{group.summary}</small>
                   </span>
+                  {(turnMaterialSelection || sentMaterials.sent.has(group.key)) && <button disabled={busy} aria-label={`移除材料 ${group.name}`} onClick={() => removeMaterialGroup(group)}><X size={13} /></button>}
                 </div>
               ))}
             </div>

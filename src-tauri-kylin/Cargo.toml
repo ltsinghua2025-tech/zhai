@@ -1,6 +1,6 @@
 [package]
 name = "zhai"
-version = "0.28.2"
+version = "0.29.0"
 description = "zhai - 银河麒麟 V10 SP1 兼容版"
 authors = ["zhai"]
 edition = "2021"

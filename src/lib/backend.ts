@@ -3,6 +3,7 @@ import builtinOutputContracts from "../../resources/builtin-output-contracts.jso
 import {
   isWebApiEnabled,
   webCancelSession,
+  webCancelSkillRun,
   webCreateSession,
   webDeleteSession,
   webGetSession,
@@ -17,6 +18,7 @@ import {
   webDownloadUrl,
   webGenerateCitizenReply,
   uploadWebSelection,
+  type UploadProgress,
   webDesignSkill,
   webDeleteSkill,
   webDisableSkill,
@@ -138,9 +140,9 @@ export async function createAgentSession(input: {
   title?: string;
   profileId: string;
   model: string;
-}): Promise<AgentSession> {
+}, signal?: AbortSignal): Promise<AgentSession> {
   if (isTauri()) return invoke("create_agent_session", { request: input });
-  if (isWebApiEnabled()) return webCreateSession(input);
+  if (isWebApiEnabled()) return webCreateSession(input, signal);
   const now = new Date().toISOString();
   const session: AgentSession = {
     id: randomId(),
@@ -156,9 +158,9 @@ export async function createAgentSession(input: {
   return session;
 }
 
-export async function listAgentSessions(): Promise<AgentSession[]> {
+export async function listAgentSessions(signal?: AbortSignal): Promise<AgentSession[]> {
   if (isTauri()) return invoke("list_agent_sessions");
-  if (isWebApiEnabled()) return webListSessions();
+  if (isWebApiEnabled()) return webListSessions(signal);
   return mockAgentSessions.map((item) => item.session);
 }
 
@@ -168,9 +170,9 @@ export async function detectCodexRuntime(): Promise<CodexRuntimeStatus> {
   return { available: false, detail: "浏览器预览不运行 Codex Harness" };
 }
 
-export async function getAgentSession(sessionId: string): Promise<AgentSessionDetail> {
+export async function getAgentSession(sessionId: string, signal?: AbortSignal): Promise<AgentSessionDetail> {
   if (isTauri()) return invoke("get_agent_session", { sessionId });
-  if (isWebApiEnabled()) return webGetSession(sessionId);
+  if (isWebApiEnabled()) return webGetSession(sessionId, signal);
   const found = mockAgentSessions.find((item) => item.session.id === sessionId);
   if (!found) throw new Error("会话不存在");
   return structuredClone(found);
@@ -207,10 +209,11 @@ export async function addAgentAttachments(
   sessionId: string,
   items: AgentAttachmentInput[],
   deduplicateSamples = false,
+  progress?: UploadProgress,
 ): Promise<AgentAttachment[]> {
   if (isTauri()) return invoke("add_agent_attachments", { request: { sessionId, items, deduplicateSamples } });
   if (isWebApiEnabled()) {
-    const uploaded = await Promise.all(items.map((item) => uploadWebSelection(sessionId, item)));
+    const uploaded = await Promise.all(items.map((item) => uploadWebSelection(sessionId, item, progress)));
     return uploaded.flat();
   }
   const found = mockAgentSessions.find((item) => item.session.id === sessionId);
@@ -257,7 +260,7 @@ export async function sendAgentMessage(
   if (!found) throw new Error("会话不存在");
   const turnId = randomId();
   const now = new Date().toISOString();
-  found.messages.push({ id: randomId(), sessionId: input.sessionId, role: "user", content: input.content, createdAt: now, turnId });
+  found.messages.push({ id: randomId(), sessionId: input.sessionId, role: "user", content: input.content, createdAt: now, turnId, attachmentIds: input.attachmentIds });
   found.session.status = "running";
   const runId = randomId();
   onEvent({ type: "tool_started", sessionId: input.sessionId, turnId, runId, toolId: "inspect_document", summary: "读取并分析附件" });
@@ -278,8 +281,8 @@ export async function sendAgentMessage(
   return structuredClone(found);
 }
 
-export async function cancelAgentTurn(sessionId: string): Promise<void> {
-  if (isTauri()) return invoke("cancel_agent_turn", { sessionId });
+export async function cancelAgentTurn(sessionId: string, turnId?: string): Promise<void> {
+  if (isTauri()) return invoke("cancel_agent_turn", { sessionId, turnId });
   if (isWebApiEnabled()) return webCancelSession(sessionId);
   const found = mockAgentSessions.find((item) => item.session.id === sessionId);
   if (found) found.session.status = "idle";
@@ -1191,6 +1194,7 @@ export async function designAgentTool(
 
 export async function cancelSkillDesign(designId: string): Promise<void> {
   if (isTauri()) return invoke("cancel_skill_design", { designId });
+  if (isWebApiEnabled()) await webCancelSkillRun(designId);
 }
 
 const mockDesignStates = new Map<string, SkillDesignState>();
@@ -1217,8 +1221,9 @@ export async function saveSkillDesignState(sessionId: string, designState: Skill
 
 export async function designAndTestSkill(request: DesignAndTestRequest, onEvent?: (event: SkillDesignEvent) => void): Promise<SkillDesignRunResult> {
   if (isTauri()) return invokeWithEvents("design_and_test_skill", { request }, (event: SkillDesignEvent) => onEvent?.(event));
-  const generated = await designAgentTool(request.design, onEvent);
-  const skill = await saveAgentTool(generated);
+  const web = isWebApiEnabled();
+  const generated = web ? await webDesignSkill({ ...request.design, designRunId: request.runId }) : await designAgentTool(request.design, onEvent);
+  const skill = web ? await webSaveSkill(generated, request.runId) : await saveAgentTool(generated);
   if (!request.autoTest || (!request.samplePaths.length && skill.supportedExtensions.length)) return { skill };
   return testAndRepairSkill({ runId: request.runId, skillId: skill.id, samplePaths: request.samplePaths, parameters: request.parameters }, onEvent);
 }
@@ -1228,8 +1233,12 @@ export async function testAndRepairSkill(request: TestAndRepairRequest, onEvent?
   if (isWebApiEnabled() && request.repair) throw new Error("当前 Web 服务尚不支持自动修复，请先在设计对话中修改后重测。");
   onEvent?.({ type: "started", designId: request.runId });
   onEvent?.({ type: "phase", phase: "testing", message: "正在运行样本测试", elapsedSeconds: 0 });
+  if (isWebApiEnabled()) {
+    const skill = await webTestSkill(request.skillId, request.samplePaths, request.parameters, request.runId);
+    return { skill, testResult: skill.testResult };
+  }
   const skill = await testSkill(request.skillId, request.samplePaths, request.parameters);
-  return { skill, testResult: { status: skill.testStatus === "passed" ? "passed" : "failed", summary: skill.availabilityDetail, outputs: [], parameters: request.parameters, repairable: !isWebApiEnabled() } };
+  return { skill, testResult: { status: skill.testStatus === "passed" ? "passed" : "failed", summary: skill.availabilityDetail, outputs: [], parameters: request.parameters, repairable: true } };
 }
 
 export async function generateCitizenReply(input: CitizenReplyRequest): Promise<CitizenReplyResult> {
@@ -1354,7 +1363,7 @@ export async function runSkill(
       (event: SkillRunEvent) => onEvent?.(event),
     );
   }
-  if (isWebApiEnabled()) return webRunSkill({ skillId, paths, parameters }, onEvent);
+  if (isWebApiEnabled()) return webRunSkill({ runId, skillId, paths, parameters }, onEvent);
   const tool = await getSkill(skillId);
   if (!tool.available) throw new Error("技能尚未发布或当前不可用");
   onEvent?.({ type: "started", runId, total: paths.length });
@@ -1365,6 +1374,7 @@ export async function runSkill(
   return { summary: `“${tool.name}”已处理 ${paths.length} 个输入`, outputDirectory, artifacts: [] };
 }
 
-export async function cancelSkillRun(runId: string): Promise<void> {
-  if (isTauri()) return invoke("cancel_skill_run", { runId });
+export async function cancelSkillRun(runId: string): Promise<void | "completed" | "stopping"> {
+  if (isTauri()) return invoke<void>("cancel_skill_run", { runId });
+  if (isWebApiEnabled()) return webCancelSkillRun(runId);
 }

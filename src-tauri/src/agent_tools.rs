@@ -5,6 +5,7 @@ struct Memory {
     outputs: Vec<Vec<PathBuf>>,
     records: Vec<Value>,
     successful_calls: HashMap<String, Value>,
+    delivery: Option<(Vec<PathBuf>, Value)>,
 }
 
 pub(super) struct ToolSession<'a> {
@@ -326,14 +327,28 @@ impl<'a> ToolSession<'a> {
         Ok(result)
     }
 
-    fn deliver(&self, args: Value) -> Result<Value, String> {
+    pub(super) fn has_delivery(&self) -> bool {
+        self.memory.lock().delivery.is_some()
+    }
+
+    pub(super) fn confirmed_delivery(&self) -> Result<Vec<PathBuf>, String> {
         let memory = self.memory.lock();
+        let Some((paths, trace)) = &memory.delivery else { return Ok(Vec::new()); };
+        // Reassert the executor's trace after the child has exited its writable scratch space.
+        write_json_atomic(&self.scratch.join("workflow-trace.json"), trace)?;
+        Ok(paths.clone())
+    }
+
+    fn deliver(&self, args: Value) -> Result<Value, String> {
+        let mut memory = self.memory.lock();
         let selector = args["input"].as_str().unwrap_or("previous");
         if selector == "original" {
             return Err("原始材料不能作为新成果交付".into());
         }
         let paths = self.inputs(selector, &memory)?;
+        if paths.is_empty() { return Err("所选阶段没有可交付成果".into()); }
         for path in &paths {
+            if is_codex_diagnostic_output(path) { return Err("该阶段包含诊断文件，请选择只包含成品的阶段".into()); }
             validate_generated_artifact(path)?;
         }
         if self.cancellation.load(Ordering::SeqCst) {
@@ -341,6 +356,7 @@ impl<'a> ToolSession<'a> {
         }
         // Replacing a delivery selection only affects this turn's dedicated
         // staging directory. Existing session artifacts are never removed.
+        memory.delivery = None;
         fs::create_dir_all(self.delivery).map_err(|e| e.to_string())?;
         for entry in fs::read_dir(self.delivery).map_err(|e| e.to_string())? {
             let path = entry.map_err(|e| e.to_string())?.path();
@@ -354,11 +370,11 @@ impl<'a> ToolSession<'a> {
             fs::copy(path, &target).map_err(|e| e.to_string())?;
             delivered.push(target);
         }
-        write_json_atomic(
-            &self.scratch.join("workflow-trace.json"),
-            &json!({"schemaVersion":1,"steps":memory.records,"delivery":selector,"inputIds":self.attachments.iter().filter(|a|a.kind!="artifact").map(|a|a.id.as_str()).collect::<Vec<_>>()}),
-        )?;
-        Ok(json!({"success":true,"outputs":delivered}))
+        let trace = json!({"schemaVersion":1,"steps":memory.records,"delivery":selector,"inputIds":self.attachments.iter().filter(|a|a.kind!="artifact").map(|a|a.id.as_str()).collect::<Vec<_>>()});
+        write_json_atomic(&self.scratch.join("workflow-trace.json"), &trace)?;
+        let response = json!({"success":true,"outputs":delivered});
+        memory.delivery = Some((delivered, trace));
+        Ok(response)
     }
 }
 

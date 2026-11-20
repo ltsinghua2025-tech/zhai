@@ -5,6 +5,26 @@ import { scanSource } from "./lib/backend";
 import * as backend from "./lib/backend";
 
 describe("zhai", () => {
+  it("桌面重开后沿用上次选择的网关，新增配置保留已有服务", async () => {
+    const official = {id:"test-official", provider:"deepseek" as const, displayName:"官方模型", baseUrl:"https://api.deepseek.com", defaultModel:"deepseek-v4-flash", keyStored:true};
+    const cloud = {id:"zhai-tianyi", provider:"openai_compatible" as const, displayName:"天翼云", baseUrl:"https://ai.ctaigw.cn/v1", defaultModel:"deepseek-v4-flash-0731-new", keyStored:true};
+    const listed = vi.spyOn(backend,"listAiProfiles").mockResolvedValue([official,cloud]);
+    try {
+      const first = render(<App />);
+      fireEvent.click(screen.getByRole("button",{name:"模型服务"}));
+      fireEvent.click(await screen.findByRole("button",{name:/天翼云/}));
+      first.unmount();
+      render(<App />);
+      fireEvent.click(screen.getByRole("button",{name:"模型服务"}));
+      expect(await screen.findByDisplayValue(cloud.baseUrl)).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button",{name:"新增模型配置"}));
+      expect(screen.getByPlaceholderText("粘贴后将保存到本机系统凭据库")).toBeInTheDocument();
+      expect(screen.getByRole("button",{name:/天翼云/})).toBeInTheDocument();
+    } finally {
+      localStorage.removeItem("zhai.desktop.activeProfile");
+      listed.mockRestore();
+    }
+  });
   it("无附件能力可填写测试参数、测试发布并运行", async () => {
     await backend.saveAgentTool({id:"generator-ui-check",name:"无附件参数验收",description:"从零生成测试",source:"designed",kind:"python",supportedExtensions:[],available:false,availabilityDetail:"待测试",status:"draft",testStatus:"untested",parameters:[{key:"title",label:"测试标题",type:"text",required:true},{key:"count",label:"测试数量",type:"number",required:true},{key:"mode",label:"测试模式",type:"choice",required:true,choices:["完整","简略"]}],steps:[]});
     const tested = vi.spyOn(backend, "testAndRepairSkill");

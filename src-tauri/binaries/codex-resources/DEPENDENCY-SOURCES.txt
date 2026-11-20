@@ -1,11 +1,11 @@
-Codex 0.163.0 Linux bwrap dependency provenance
-Checked 2026-10-22 against the official rust-v0.163.0 source tag.
+Codex 0.171.0 Linux bwrap dependency provenance
+Checked 2026-11-21 against the official rust-v0.171.0 source tag.
 
 Bubblewrap:
 The bundled source identifies version 0.11.2 and contains Codex-specific changes.
 License: LGPL-2.0-or-later; see Bubblewrap-COPYING.txt and Bubblewrap-LICENSE.txt.
-Corresponding Codex source and build scripts: source/codex-rust-v0.163.0-source.tar.gz
-Upstream: https://github.com/openai/codex/tree/rust-v0.163.0/codex-rs/vendor/bubblewrap
+Corresponding Codex source and build scripts: source/codex-rust-v0.171.0-source.tar.gz
+Upstream: https://github.com/openai/codex/tree/rust-v0.171.0/codex-rs/vendor/bubblewrap
 
 libcap:
 The official .github/scripts/install-musl-build-tools.sh pins libcap 2.75,

@@ -85,6 +85,55 @@ fn selected_symlinks_reject_mixed_batch_before_any_snapshot() {
 }
 
 #[test]
+fn chat_folder_import_preflights_limits_filters_hidden_trees_and_rolls_back_sql_failures() {
+    let scratch = Scratch::new();
+    let (state, session) = scratch.setup();
+    let batch = |items| add_agent_attachments_inner(AddAgentAttachmentsRequest {
+        session_id: session.id.clone(), items, deduplicate_samples: false,
+    }, &state);
+    scratch.create_file("首批/.history/旧.txt", b"hidden");
+    scratch.create_file("首批/~$旧稿/草稿.txt", b"temp");
+    let original = scratch.create_file("首批/选中.txt", b"keep");
+    let saved = batch(vec![folder(original.parent().unwrap())]).unwrap();
+    assert_eq!(saved.len(), 1);
+    assert_snapshot(&state, &session, &original, &saved[0]);
+    for n in 0..1001 { scratch.create_file(&format!("超限/{n}.txt"), b"x"); }
+    assert!(batch(vec![folder(&scratch.0.join("超限"))]).unwrap_err().contains("1000"));
+    state.db.lock().execute_batch("CREATE TRIGGER qa_chat_reject BEFORE INSERT ON agent_attachments WHEN new.name='拒绝.txt' BEGIN SELECT RAISE(ABORT,'reject'); END;").unwrap();
+    let first = scratch.create_file("新增.txt", b"first");
+    let second = scratch.create_file("拒绝.txt", b"second");
+    assert!(batch(vec![file(&first), file(&second)]).unwrap_err().contains("reject"));
+    let after = list_session_attachments(&state, &session.id).unwrap();
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].id, saved[0].id);
+    let directory = state.data_dir.join("sessions").join(&session.id).join("inputs");
+    assert_eq!(fs::read_dir(directory).unwrap().count(), 1);
+    assert_snapshot(&state, &session, &original, &after[0]);
+}
+
+#[test]
+fn chat_explicit_materials_are_session_scoped_and_restored_with_each_message() {
+    let scratch = Scratch::new();
+    let (state, session) = scratch.setup();
+    let a = scratch.create_file("甲.txt", b"A");
+    let b = scratch.create_file("乙.txt", b"B");
+    let added = import(&state, &session, vec![file(&a), file(&b)]).unwrap();
+    let mut request: SendAgentMessageRequest = serde_json::from_value(json!({
+        "sessionId": session.id, "content": "只处理乙", "profileId": "p", "model": "m",
+        "attachmentIds": [added[1].id]
+    })).unwrap();
+    let selected = list_turn_attachments(&state, &request).unwrap();
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].name, "乙.txt");
+    insert_agent_message_with_inputs(&state, &session.id, "user", &request.content, Some("turn"), request.attachment_ids.clone()).unwrap();
+    assert_eq!(list_session_messages(&state, &session.id).unwrap()[0].attachment_ids, request.attachment_ids);
+    request.attachment_ids = Some(vec![]);
+    assert!(list_turn_attachments(&state, &request).unwrap().is_empty());
+    request.attachment_ids = Some(vec!["other-session".into()]);
+    assert!(list_turn_attachments(&state, &request).is_err());
+}
+
+#[test]
 fn folder_import_recurses_into_xlsm_and_reports_empty_batches() {
     let scratch = Scratch::new();
     let (state, session) = scratch.setup();

@@ -3,20 +3,20 @@
 set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PROJECT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
-VERSION=0.163.0
+VERSION=0.171.0
 case "$(uname -s)-$(uname -m)" in
   Darwin-arm64)
     asset=codex-aarch64-apple-darwin
     target=aarch64-apple-darwin
-    archive_hash=61c4d9a92521bdb42b0c1d9f87c673f6da628a06de5945cbdd9a0010632f6d10
-    binary_hash=8813367285524ac798dd96d1b071aea30d58708c7226fd236cd275cf1cfdee31
+    archive_hash=9414c8c967f110b11e8324c0cfa2b20f012094ef890110a561c92ee535a2681a
+    binary_hash=fc8d77cf7585aded2b9bc487dad29c4ee2f066123e4e76dd3b17653a8322ce42
     ;;
   Linux-aarch64)
     asset=codex-aarch64-unknown-linux-musl
     # Tauri names sidecars by its host target; the contents remain official musl.
     target=aarch64-unknown-linux-gnu
-    archive_hash=a7261e65f4a96d8f4ca65a069c6cf2dc2c33defc341e48078acefda9461fffe4
-    binary_hash=8a96f66d059d653e68bfd5f3c79337e6f1d7d170d80bf705eb7d0249b34c0ece
+    archive_hash=bcf50b836385e51bd2976ab2bbe92b1b08a1cbe37712eb8dbe378aa78d24871c
+    binary_hash=9ba12ec7712e2905b2ea00791f4ebddc9528629cc955d11d25272de445e10643
     ;;
   *) echo "Codex 包仅支持 macOS Apple Silicon 和 Linux ARM64" >&2; exit 1 ;;
 esac

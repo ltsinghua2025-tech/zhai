@@ -263,6 +263,12 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .composer-materials b { overflow: hidden; font-size: 9.2px; text-overflow: ellipsis; white-space: nowrap; }
 .composer-materials i { min-width: 15px; padding: 1px 4px; color: #617569; font-size: 9.0px; font-style: normal; text-align: center; background: #d4e5f2; border-radius: 8px; }
 .composer-materials button { display: grid; place-items: center; padding: 2px; color: #87928b; background: transparent; border: 0; }
+.turn-file-selection { margin: 4px 0; font-size: 12px; }
+.turn-file-selection summary { width: fit-content; cursor: pointer; }
+.turn-file-selection > div { display: grid; gap: 5px; max-height: 160px; overflow-y: auto; padding: 6px 0; }
+.turn-file-selection button { justify-self: start; }
+.turn-file-selection label { display: flex; align-items: center; gap: 6px; overflow-wrap: anywhere; }
+.turn-file-selection details label { padding-left: 14px; }
 
 .context-column { padding: 8px; overflow: auto; border-left: 1px solid var(--line); }
 .context-column > section { margin-bottom: 7px; overflow: hidden; background: rgba(255,255,255,.76); border: 1px solid #d8e5ee; border-radius: 8px; }

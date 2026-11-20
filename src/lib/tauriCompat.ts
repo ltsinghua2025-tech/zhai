@@ -27,6 +27,10 @@ export function getWebSelectionFiles(token: string) {
   return webSelections.get(token) || [];
 }
 
+export function releaseWebSelection(token: string) {
+  webSelections.delete(token);
+}
+
 export function invokeCompat<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   return isKylinLegacy ? invokeV1<T>(command, args) : invokeV2<T>(command, args);
 }
@@ -73,14 +77,26 @@ export function openDialog(options: Parameters<typeof openV2>[0]): Promise<strin
         .map((extension) => `.${extension}`)
         .join(",");
       if (accept) input.accept = accept;
-      input.onchange = () => {
+      // Some embedded browsers close their picker without change or cancel.
+      // The next interaction with the page also settles the abandoned picker.
+      const settle = () => {
+        input.onchange = null;
+        input.removeEventListener("cancel", settle);
+        window.removeEventListener("pointerdown", settle, true);
+        window.removeEventListener("keydown", settle, true);
+        input.remove();
         const files = Array.from(input.files || []);
         if (!files.length) return resolve(null);
         const token = `web-selection:${randomId()}`;
         webSelections.set(token, files);
         resolve(token);
       };
-      input.addEventListener("cancel", () => resolve(null), { once: true });
+      input.onchange = settle;
+      input.addEventListener("cancel", settle, { once: true });
+      input.hidden = true;
+      document.body.appendChild(input);
+      window.addEventListener("pointerdown", settle, true);
+      window.addEventListener("keydown", settle, true);
       input.click();
     });
   }

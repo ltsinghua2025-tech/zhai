@@ -406,7 +406,7 @@ async fn test_with_repair(
                 copy_directory(Path::new(package), &workspace)?;
             }
         }
-        let repaired = design_agent_tool_cancellable(request, state, &ProgressOnly(events), cancellation.clone(), Duration::from_secs(120)).await;
+        let repaired = design_agent_tool_cancellable(request, state, &ProgressOnly(events), cancellation.clone(), Duration::from_secs(300)).await;
         match repaired {
             Ok(mut candidate) => {
                 if candidate.id != tool.id { return Err("修复结果改变了能力包标识，已拒绝覆盖".into()); }

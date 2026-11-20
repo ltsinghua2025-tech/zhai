@@ -1071,10 +1071,19 @@ def process_xlsx(
         changes += 1
     if "delete_blank_rows" in operation_kinds:
         for sheet in workbook.worksheets:
+            # openpyxl computes max_column by scanning the worksheet.
+            columns = range(1, sheet.max_column + 1)
+            blank_count = 0
             for row_index in range(sheet.max_row, 0, -1):
-                if all(sheet.cell(row_index, column).value is None for column in range(1, sheet.max_column + 1)):
-                    sheet.delete_rows(row_index)
-                    changes += 1
+                if all(sheet.cell(row_index, column).value is None for column in columns):
+                    blank_count += 1
+                elif blank_count:
+                    sheet.delete_rows(row_index + 1, blank_count)
+                    changes += blank_count
+                    blank_count = 0
+            if blank_count:
+                sheet.delete_rows(1, blank_count)
+                changes += blank_count
     if "replace_text" in operation_kinds and not replacements:
         notes.append("未配置具体替换对，公式和单元格保持原样")
     workbook.calculation.fullCalcOnLoad = True

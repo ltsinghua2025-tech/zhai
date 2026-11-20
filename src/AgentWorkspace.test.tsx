@@ -122,6 +122,21 @@ describe("design session lifecycle", () => {
     expect(mocked.design).toHaveBeenCalledTimes(1);
   });
 
+  it("preserves the draft while the file chooser is open and ignores a superseded selection", async () => {
+    let resolveFirst!: (paths: string[]) => void;
+    mocked.open.mockImplementationOnce(() => new Promise(resolve => { resolveFirst = resolve; }));
+    await act(async () => { render(workspace({ startInDesignMode: true })); });
+    fireEvent.change(composer(), { target: { value: "把文件转换成文本" } });
+    fireEvent.click(screen.getByTitle("添加文件"));
+    expect(screen.queryByRole("button", { name: "停止任务" })).toBeNull();
+    expect(screen.queryByText(/正在准备本轮任务/)).toBeNull();
+    expect(screen.getByRole("button", { name: "发送消息" })).toBeEnabled();
+    await addSamples("/samples/second.csv");
+    await act(async () => { resolveFirst(["/samples/stale.csv"]); });
+    expect(composer()).toHaveValue("把文件转换成文本");
+    expect(mocked.sessions.get("session-1")!.attachments.map(item => item.name)).toEqual(["second.csv"]);
+  });
+
   it("shows file picker failures and allows another upload in the same design", async () => {
     await act(async () => { render(workspace({ startInDesignMode: true })); });
     mocked.open.mockRejectedValueOnce(new Error("文件选择器暂不可用"));
@@ -300,13 +315,19 @@ describe("Agent execution lifecycle", () => {
   it("does not grant material access for chat and waits for cancellation to finish", async () => {
     let request: SendAgentMessageRequest | undefined;
     let finish: (value: AgentSessionDetail) => void = () => {};
-    mocked.send.mockImplementation((value: SendAgentMessageRequest) => { request = value; return new Promise<AgentSessionDetail>(resolve => { finish = resolve; }); });
+    let emit: ((event: import("./types").AgentEvent) => void) | undefined;
+    mocked.send.mockImplementation((value: SendAgentMessageRequest, onEvent: typeof emit) => {
+      request = value; emit = onEvent;
+      return new Promise<AgentSessionDetail>(resolve => { finish = resolve; });
+    });
     render(workspace());
     await send("帮我想两个标题");
     await waitFor(() => expect(mocked.send).toHaveBeenCalledTimes(1));
     expect(request?.allowModelFileAccess).toBe(false);
     fireEvent.click(screen.getByRole("button", { name: "停止任务" }));
-    await waitFor(() => expect(mocked.cancel).toHaveBeenCalledTimes(1));
+    expect(mocked.cancel).not.toHaveBeenCalled();
+    await act(async () => emit?.({ type: "phase", sessionId: request!.sessionId, turnId: "registered-turn", message: "后台已开始" }));
+    await waitFor(() => expect(mocked.cancel).toHaveBeenCalledWith(request!.sessionId, "registered-turn"));
     expect(screen.getByRole("button", { name: "停止任务" })).toBeInTheDocument();
     fireEvent.change(composer(), { target: { value: "下一条消息" } });
     fireEvent.keyDown(composer(), { key: "Enter" });

@@ -2,6 +2,7 @@ import { File, FolderOpen, Play, Wrench, X } from "@phosphor-icons/react";
 import { SkillParameterField } from "./SkillParameterField";
 import type { AgentTool, SkillTestResult } from "./types";
 import { getWebSelectionFiles } from "./lib/tauriCompat";
+import { isWebApiEnabled } from "./lib/webApi";
 
 export function skillInputExtensions(skill: AgentTool): string[] {
   return skill.supportedExtensions.map(extension => extension.replace(/^\.+/, "").toLowerCase());
@@ -65,7 +66,8 @@ export function SkillTestPanel({ skill, paths, sampleLabels, parameters, result,
     {result && <div className={`test-result ${result.status}`} role="status">
       <strong>{({ passed: "样本执行通过", failed: "测试未通过", needs_input: "需要补充信息", cancelled: "测试已停止" })[result.status]}</strong>
       <p>{result.summary}</p>
-      {result.status === "passed" && result.outputDirectory && <button onClick={() => onOpen(result.outputDirectory!)}><FolderOpen size={15} />打开测试成果</button>}
+      {result.status === "passed" && isWebApiEnabled() && result.outputs.map(path => <button key={path} onClick={() => onOpen(path)}><File size={15} />下载 {path.split("/").pop()}</button>)}
+      {result.status === "passed" && !isWebApiEnabled() && result.outputDirectory && <button onClick={() => onOpen(result.outputDirectory!)}><FolderOpen size={15} />打开测试成果</button>}
       {result.status === "passed" && requiresFiles && <small>当前样本通过不代表所有材料都适用，建议换一份样本验证后发布。</small>}
     </div>}
     <div className="design-test-actions">

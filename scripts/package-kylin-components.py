@@ -71,6 +71,7 @@ def main():
     parser.add_argument("--main-deb", type=Path, required=True)
     parser.add_argument("--ocr-binary", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--revision", default="1", help="Debian package revision")
     args = parser.parse_args()
     if not shutil.which("dpkg-deb"):
         parser.error("请在 Linux 构建环境运行，需要 dpkg-deb")
@@ -79,6 +80,9 @@ def main():
     version = json.loads((project / "package.json").read_text())["version"]
     if not re.fullmatch(r"\d+\.\d+\.\d+", version):
         parser.error("版本格式无效")
+    if not re.fullmatch(r"[1-9][0-9]*", args.revision):
+        parser.error("Debian 修订号格式无效")
+    package_version = f"{version}-{args.revision}"
     if not args.ocr_binary.is_file() or not os.access(args.ocr_binary, os.X_OK):
         parser.error("缺少已验证的 OCR 可执行组件")
     header = subprocess.check_output(["dpkg-deb", "--field", str(args.main_deb)], text=True)
@@ -98,7 +102,7 @@ def main():
         )
         if any(re.search(r"\bzhai-ocr\b", value) for value in dependency_fields):
             raise RuntimeError("OCR 不得成为自动安装依赖")
-        control_path.write_text(field(control, "Suggests", "zhai-ocr"))
+        control_path.write_text(field(field(control, "Suggests", "zhai-ocr"), "Version", package_version))
         ocr_stage = work / "ocr"
         executable = ocr_stage / "usr/lib/zhai/ocr/material-workshop-rapid-ocr"
         executable.parent.mkdir(parents=True)
@@ -109,17 +113,17 @@ def main():
         shutil.copyfile(project / "src-tauri/binaries/OCR-THIRD-PARTY-NOTICES.txt", notices)
         (ocr_stage / "DEBIAN").mkdir()
         (ocr_stage / "DEBIAN/control").write_text(
-            f"Package: zhai-ocr\nVersion: {version}\nArchitecture: arm64\n"
+            f"Package: zhai-ocr\nVersion: {package_version}\nArchitecture: arm64\n"
             "Maintainer: zhai\nSection: utils\nPriority: optional\n"
-            f"Depends: zhai (= {version}), libc6 (>= 2.31), libgcc-s1, libstdc++6\n"
+            f"Depends: zhai (= {package_version}), libc6 (>= 2.31), libgcc-s1, libstdc++6\n"
             "Description: Optional offline Chinese PDF OCR for zhai\n"
             " Includes fixed local RapidOCR models and an isolated CPU runtime.\n"
             " Install only when scanned PDF text recognition is needed.\n"
         )
-        results = [build(main_stage, args.output_dir / f"zhai_{version}_arm64.deb", work),
-                   build(ocr_stage, args.output_dir / f"zhai-ocr_{version}_arm64.deb", work)]
+        results = [build(main_stage, args.output_dir / f"zhai_{package_version}_arm64.deb", work),
+                   build(ocr_stage, args.output_dir / f"zhai-ocr_{package_version}_arm64.deb", work)]
         (args.output_dir / "package-manifest.json").write_text(json.dumps({
-            "version": version, "compression": "xz-6", "mainInputBytes": args.main_deb.stat().st_size,
+            "version": package_version, "compression": "xz-6", "mainInputBytes": args.main_deb.stat().st_size,
             "mainInputSha256": digest(args.main_deb), "packages": results,
         }, ensure_ascii=False, indent=2) + "\n")
         for result in results:
