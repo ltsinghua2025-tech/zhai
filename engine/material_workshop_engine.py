@@ -875,8 +875,149 @@ def convert_office(
     raise RuntimeError("没有可用的办公转换器；请配置已验证的 WPS 桥接，或安装 LibreOffice 作为回退")
 
 
-def center_footer_page_numbers(document: Any) -> int:
+def footer_number_fields(root: Any) -> list[tuple[str, Any, Any]]:
+    """Read OOXML field boundaries in story order, including split instruction runs."""
+    from docx.oxml.ns import qn
+
+    fields = []
+    stack = []
+
+    def record(code, start, end, nested):
+        words = code.strip().upper().split()
+        if words and words[0] in {"PAGE", "NUMPAGES", "SECTIONPAGES"}:
+            if nested:
+                raise ValueError("页脚把页码嵌在另一项域运算中。请确认是否保留计算公式，并另起一行显示当前页码。")
+            fields.append((words[0], start, end))
+
+    for node in root.xpath(".//w:fldSimple | .//w:fldChar | .//w:instrText | .//w:pgNum"):
+        if node.tag == qn("w:pgNum"):
+            record("PAGE", node, node, stack)
+        elif node.tag == qn("w:fldSimple"):
+            nested = bool(stack) or any(True for _ in node.iterancestors(qn("w:fldSimple"))) or any(
+                True for _ in node.iterdescendants(qn("w:fldSimple"), qn("w:fldChar")))
+            record(node.get(qn("w:instr"), ""), node, node, nested)
+        elif node.tag == qn("w:instrText"):
+            if stack and not stack[-1]["result"]:
+                stack[-1]["code"].append(node.text or "")
+            elif not stack and re.match(r"^\s*PAGE\b", node.text or "", re.I):
+                raise ValueError("页脚中的 PAGE 指令缺少起止标记。请确认是否替换这个不完整的页码域。")
+        else:
+            kind = node.get(qn("w:fldCharType"))
+            if kind == "begin":
+                if stack:
+                    stack[-1]["nested"] = True
+                stack.append({"start": node, "code": [], "result": False, "nested": bool(stack) or bool(list(node.iterancestors(qn("w:fldSimple"))))})
+            elif kind == "separate" and stack:
+                stack[-1]["result"] = True
+            elif kind == "end" and stack:
+                field = stack.pop()
+                record("".join(field["code"]), field["start"], node, field["nested"])
+    if stack:
+        raise ValueError("页脚中的域缺少结束标记。请确认应保留的页脚内容后修复该域。")
+    return fields
+
+
+def split_footer_run(run: Any, index: int) -> Any:
+    """Separate shared literal text from a field while keeping both run formats."""
+    from copy import deepcopy
+    from docx.oxml.ns import qn
+
+    tail = deepcopy(run)
+    for child in list(tail):
+        if child.tag != qn("w:rPr"):
+            tail.remove(child)
+    for child in list(run)[index:]:
+        tail.append(child)
+    run.addnext(tail)
+    return tail
+
+
+def align_footer_number(footer: Any, fields: list[tuple[str, Any, Any]]) -> int:
+    from copy import deepcopy
     from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.oxml.ns import qn
+    from docx.text.paragraph import Paragraph
+
+    pages = [start for kind, start, _ in fields if kind == "PAGE"]
+    if len(pages) != 1:
+        raise ValueError("同一页脚含多个当前页码。请指定保留哪个位置，例如左侧或右侧。")
+    page = pages[0]
+    p = next(page.iterancestors(qn("w:p")), None)
+    if p is None or any(a.tag not in {qn("w:sdtContent"), qn("w:sdt"), qn("w:ftr")} for a in p.iterancestors()):
+        raise ValueError("页码位于表格、文本框或特殊容器中。请确认要在原容器内居中，还是移到整页的页脚中央。")
+    paragraph = Paragraph(p, footer)
+    eligible = set()
+    for _, start, end in fields:
+        if next(start.iterancestors(qn("w:p")), None) is not p:
+            continue
+        left = start if start.tag == qn("w:fldSimple") else start.getparent()
+        right = end if end.tag == qn("w:fldSimple") else end.getparent()
+        if left.getparent() is not p or right.getparent() is not p:
+            raise ValueError("页码跨段或位于带标记的行内内容中。请确认是否允许把页码移到独立段落。")
+        if left is not start and any(c.tag != qn("w:rPr") for c in list(left)[:left.index(start)]):
+            left = split_footer_run(left, left.index(start))
+            right = end.getparent()
+        if right is not end and right.index(end) + 1 < len(right):
+            split_footer_run(right, right.index(end) + 1)
+        eligible.update(list(p)[p.index(left):p.index(right) + 1])
+    # Keep page labels and counters such as “— 3 —” and “第 3 页 / 共 8 页” together.
+    content = [child for child in p if child.tag != qn("w:pPr")]
+    for child in content:
+        if child.tag == qn("w:r") and all(n.tag in {qn("w:rPr"), qn("w:t"), qn("w:tab"), qn("w:ptab")} for n in child):
+            label = "".join(child.xpath("./w:t/text()"))
+            if re.fullmatch(r"(?:[\s第共页頁總总/／|·.,:：()（）\-–—－]|pages?|of)*", label, re.I):
+                eligible.add(child)
+    anchor = page
+    while anchor.getparent() is not p:
+        anchor = anchor.getparent()
+    first = last = content.index(anchor)
+    while first > 0 and content[first - 1] in eligible:
+        first -= 1
+    while last + 1 < len(content) and content[last + 1] in eligible:
+        last += 1
+    group = content[first:last + 1]
+    changed = False
+    if len(group) != len(content):
+        if p.xpath(".//w:bookmarkStart | .//w:bookmarkEnd | .//w:commentRangeStart | .//w:commentRangeEnd | .//w:ins | .//w:del"):
+            raise ValueError("页码和带书签、批注或修订的文字共用一行。请确认能否把页码从标记范围中单独取出。")
+        adjacent_text = ["".join(t.text or "" for t in node.iter(qn("w:t"))) for node in content[:first][-1:] + content[last + 1:last + 2]]
+        if any(re.search(r"(?:第|共|\bpage)\s*$|^\s*[页頁]", text, re.I) for text in adjacent_text):
+            raise ValueError("页码标签和落款写在同一段文字里。请确认页码应保留的前缀和后缀。")
+        target = footer.add_paragraph(style=paragraph.style)
+        p.addnext(target._p)
+        for mark_style in p.xpath("./w:pPr/w:rPr"):
+            target._p.get_or_add_pPr().append(deepcopy(mark_style))
+        for child in group:
+            if child.tag == qn("w:r") and child.xpath("./w:tab | ./w:ptab"):
+                # Keep the signature's tab stops in place when the field leaves its line.
+                for tab in child.xpath("./w:tab | ./w:ptab"):
+                    spacer = deepcopy(child)
+                    for item in list(spacer):
+                        if item.tag != qn("w:rPr"):
+                            spacer.remove(item)
+                    child.addprevious(spacer)
+                    spacer.append(tab)
+            target._p.append(child)
+        paragraph = target
+        changed = True
+    # Tabs position content independently of paragraph alignment. Remove only positioning
+    # tabs on the isolated number line, and override inherited/character-unit indents.
+    for tab in paragraph._p.xpath("./w:r/w:tab | ./w:r/w:ptab"):
+        tab.getparent().remove(tab)
+        changed = True
+    desired = {qn("w:left"): "0", qn("w:right"): "0", qn("w:firstLine"): "0"}
+    indent = paragraph._p.get_or_add_pPr().get_or_add_ind()
+    if dict(indent.attrib) != desired:
+        indent.attrib.clear()
+        indent.attrib.update(desired)
+        changed = True
+    if paragraph.alignment != WD_ALIGN_PARAGRAPH.CENTER:
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        changed = True
+    return int(changed)
+
+
+def center_footer_page_numbers(document: Any) -> int:
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
 
@@ -894,21 +1035,12 @@ def center_footer_page_numbers(document: Any) -> int:
                 continue
             seen.add(root)
             paragraphs = footer.paragraphs
-            fields = [node for node in root.xpath('.//w:fldSimple | .//w:instrText')
-                      if re.match(r'^\s*PAGE(?:\s|$)', node.get(qn('w:instr')) or node.text or '', re.I)]
-            if fields:
-                # Moving a mixed paragraph or a table cell would also move unrelated content.
-                standalone = next((p for p in paragraphs if len(fields) == 1 and fields[0].getparent() is p._p
-                                   and all(child is fields[0] or child.tag == qn('w:pPr') for child in p._p)), None)
-                if standalone is None:
-                    raise ValueError("已有复杂页码，请在 Word 中核对页脚布局后再调整。")
-                if standalone.alignment != WD_ALIGN_PARAGRAPH.CENTER:
-                    standalone.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    changes += 1
+            fields = footer_number_fields(root)
+            if any(kind == "PAGE" for kind, _, _ in fields):
+                changes += align_footer_number(footer, fields)
                 continue
             empty = len(root) == 1 and len(paragraphs) == 1 and all(child.tag == qn('w:pPr') for child in paragraphs[0]._p)
             p = paragraphs[0] if empty else footer.add_paragraph()
-            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
             field = OxmlElement('w:fldSimple')
             field.set(qn('w:instr'), ' PAGE ')
             field.set(qn('w:dirty'), 'true')
@@ -918,6 +1050,7 @@ def center_footer_page_numbers(document: Any) -> int:
             run.append(display)
             field.append(run)
             p._p.append(field)
+            align_footer_number(footer, [("PAGE", field, field)])
             changes += 1
     return changes
 
@@ -1041,6 +1174,8 @@ def process_docx(
         candidate = docx.Document(temporary)
         if original_content is not None and content_signature(candidate) != original_content:
             raise RuntimeError("排版内容完整性检查失败，未发布成果；请保留原件并检查对象或关系变化")
+        if "center_docx_page_numbers" in operation_kinds and center_footer_page_numbers(candidate):
+            raise RuntimeError("重新打开文档后页码验证未通过，请检查页脚内容。")
     atomic_writer(target, save_checked)
     reopened = docx.Document(target)
     return {

@@ -211,6 +211,21 @@ describe("design session lifecycle", () => {
     expect(screen.queryByText("结构校验")).not.toBeInTheDocument();
   });
 
+  it("uses the active web draft when asked to try it and identifies a missing sample", async () => {
+    vi.stubEnv("VITE_WEB_API", "1");
+    try {
+      render(workspace({ designTarget: skill }));
+      await screen.findByRole("region", { name: "能力包样本测试" });
+      await send("试试");
+      expect(screen.getByText("试试")).toBeInTheDocument();
+      expect(screen.getAllByText(/请添加至少一份原始样本/).length).toBeGreaterThan(1);
+      expect(mocked.design).not.toHaveBeenCalled();
+      expect(mocked.repair).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("tests current originals after design and preserves the passed result without saving again", async () => {
     const passedSkill: AgentTool = { ...skill, testStatus: "passed" };
     mocked.design.mockResolvedValue({ skill: passedSkill, testResult: { status: "passed", summary: "当前样本处理成功", parameters: { column: "单位" }, outputs: ["/results/result.csv"], outputDirectory: "/results", repairable: false } });

@@ -1225,16 +1225,16 @@ export async function designAndTestSkill(request: DesignAndTestRequest, onEvent?
   const generated = web ? await webDesignSkill({ ...request.design, designRunId: request.runId }) : await designAgentTool(request.design, onEvent);
   const skill = web ? await webSaveSkill(generated, request.runId) : await saveAgentTool(generated);
   if (!request.autoTest || (!request.samplePaths.length && skill.supportedExtensions.length)) return { skill };
-  return testAndRepairSkill({ runId: request.runId, skillId: skill.id, samplePaths: request.samplePaths, parameters: request.parameters }, onEvent);
+  return testAndRepairSkill({ runId: request.runId, skillId: skill.id, samplePaths: request.samplePaths, parameters: request.parameters,
+    repair: web ? request.design : undefined }, onEvent);
 }
 
 export async function testAndRepairSkill(request: TestAndRepairRequest, onEvent?: (event: SkillDesignEvent) => void): Promise<SkillDesignRunResult> {
   if (isTauri()) return invokeWithEvents("test_and_repair_skill", { request }, (event: SkillDesignEvent) => onEvent?.(event));
-  if (isWebApiEnabled() && request.repair) throw new Error("当前 Web 服务尚不支持自动修复，请先在设计对话中修改后重测。");
   onEvent?.({ type: "started", designId: request.runId });
   onEvent?.({ type: "phase", phase: "testing", message: "正在运行样本测试", elapsedSeconds: 0 });
   if (isWebApiEnabled()) {
-    const skill = await webTestSkill(request.skillId, request.samplePaths, request.parameters, request.runId);
+    const skill = await webTestSkill(request.skillId, request.samplePaths, request.parameters, request.runId, request.repair);
     return { skill, testResult: skill.testResult };
   }
   const skill = await testSkill(request.skillId, request.samplePaths, request.parameters);

@@ -52,7 +52,7 @@ export function SkillTestPanel({ skill, paths, sampleLabels, parameters, result,
   const network = skill.requiresNetwork || skill.permissions?.includes("network");
   return <section className="design-test-panel" aria-label="能力包样本测试">
     <header><strong>样本测试</strong><span>{network ? "需联网" : "可离线运行"} · {requiresFiles ? `${count} 份原始样本` : "无需原始样本"}</span></header>
-    <p>{network ? "运行依赖模型或外部服务；仅在相应联网执行环境可用时测试。" : "本地执行，原件保持不变。设计和自动修复需要调用模型。"}</p>
+    <p>{network ? "运行依赖模型或外部服务；仅在相应联网执行环境可用时测试。" : isWebApiEnabled() ? "样本由服务器处理。设计和自动修复可调用模型，成果另存为新文件。" : "本地执行，原件保持不变。设计和自动修复需要调用模型。"}</p>
     {requiresFiles && <button type="button" disabled={busy} onClick={onAdd}><File size={15} />添加测试样本</button>}
     {!!paths.length && <ul className="test-samples">{paths.map(path => {
       const name = sampleNames(path, sampleLabels).join("、");

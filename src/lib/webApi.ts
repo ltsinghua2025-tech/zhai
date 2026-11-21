@@ -1,10 +1,14 @@
-import type { AgentAttachment, AgentAttachmentInput, AgentEvent, AgentSession, AgentSessionDetail, AgentTool, AiConnectionResult, AiProfile, CitizenReplyRequest, CitizenReplyResult, DesignAttachment, SkillRunEvent, SkillRunResult } from "../types";
+import type { AgentAttachment, AgentAttachmentInput, AgentEvent, AgentSession, AgentSessionDetail, AgentTool, AiConnectionResult, AiProfile, CitizenReplyRequest, CitizenReplyResult, DesignAttachment, DesignToolRequest, SkillRunEvent, SkillRunResult } from "../types";
 import { getWebSelectionFiles, isWebRuntime, randomId } from "./tauriCompat";
 
 const API_BASE = (import.meta.env.VITE_API_BASE || "/api").replace(/\/$/, "");
 
 export function isWebApiEnabled() {
   return isWebRuntime() && import.meta.env.VITE_WEB_API === "1";
+}
+
+export function webReleaseInfo() {
+  return request<{ version: string; revision?: string }>("/health");
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -218,10 +222,11 @@ export function webSaveSkill(tool: AgentTool, designRunId?: string) {
   return request<AgentTool>("/skills", { method: "POST", body: JSON.stringify({ tool, designRunId }) });
 }
 
-export async function webTestSkill(skillId: string, paths: string[], parameters: Record<string, unknown> = {}, designRunId: string = randomId()) {
+export async function webTestSkill(skillId: string, paths: string[], parameters: Record<string, unknown> = {}, designRunId: string = randomId(), design?: DesignToolRequest) {
   const files = await prepareSkillInputs(designRunId, paths);
+  const repair = design && { prompt: design.prompt, baseUrl: design.baseUrl, model: design.model, apiKey: design.apiKey };
   return request<AgentTool>(`/skills/${encodeURIComponent(skillId)}/test`, {
-    method: "POST", body: JSON.stringify({ files, parameters, designRunId }),
+    method: "POST", body: JSON.stringify({ files, parameters, designRunId, repair }),
   });
 }
 

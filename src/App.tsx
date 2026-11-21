@@ -53,7 +53,7 @@ import {
   testAndRepairSkill,
   cancelSkillDesign,
 } from "./lib/backend";
-import { isWebApiEnabled } from "./lib/webApi";
+import { isWebApiEnabled, webReleaseInfo } from "./lib/webApi";
 import type {
   AgentTool,
   AiProfile,
@@ -156,6 +156,15 @@ function getToolCategory(
 
 function App() {
   const webMode = isWebApiEnabled();
+  const [webVersion, setWebVersion] = useState("");
+  useEffect(() => {
+    if (!webMode) return;
+    let active = true;
+    webReleaseInfo().then(({ version, revision }) => {
+      if (active && version) setWebVersion([version, revision].filter(Boolean).join("-"));
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [webMode]);
   const [view, setView] = useState<View>("agent");
   const [tools, setTools] = useState<AgentTool[]>([]);
   const [profiles, setProfiles] = useState<AiProfile[]>([]);
@@ -239,9 +248,10 @@ function App() {
           <div className="web-mode-notice">
             <Cloud size={15} />
             <span>
+              {[activeProfile?.managed ? "评委体验版" : "网页版", webVersion].filter(Boolean).join(" ")}
               {activeProfile?.managed
-                ? "评委体验版 0.28.2 · 本浏览器单独保存会话和成果。材料在服务器处理，可上传 DOCX、XLSX 或带文字层的 PDF。"
-                : "网页版 0.28.2 · 支持 DOCX 排版、文字修改、Excel 汇总和 PDF 文本提取。材料在服务器处理。"}
+                ? " · 本浏览器单独保存会话和成果。材料在服务器处理，可上传 DOCX、XLSX 或带文字层的 PDF。"
+                : " · 支持 DOCX 排版、文字修改、Excel 汇总和 PDF 文本提取。材料在服务器处理。"}
             </span>
           </div>
         )}
@@ -1140,10 +1150,11 @@ function SkillsWorkspace({
     setBusy("testing"); setError(undefined); setTestProgress("正在运行样本测试");
     try {
       const result = await testAndRepairSkill({ runId, skillId: selectedSkill.id, samplePaths: runPaths, parameters: runParameters,
-        repair: repair && profile ? { designId: `repair-${selectedSkill.id}`, currentSkillId: selectedSkill.id, prompt: "根据真实测试错误修复当前能力包并重测，保留原有规则。", profileId: profile.id, model: profile.defaultModel, apiKey: apiKey || undefined, kind: selectedSkill.kind === "python" ? "python" : "workflow", attachments: runPaths.map(path => ({ path, role: "sample_input" })) } : undefined,
+        repair: repair && profile ? { designId: `repair-${selectedSkill.id}`, currentSkillId: selectedSkill.id, prompt: "根据真实测试错误修复当前能力包并重测，保留原有规则。", profileId: profile.id, model: profile.defaultModel, baseUrl: profile.baseUrl, apiKey: apiKey || undefined, kind: selectedSkill.kind === "python" ? "python" : "workflow", attachments: runPaths.map(path => ({ path, role: "sample_input" })) } : undefined,
       }, event => { if (event.type === "phase" || event.type === "test_progress") setTestProgress(event.message); });
       setSelectedSkill(result.skill);
-      updateSkillInputs(selectedSkill, current => ({ ...current, testResult: result.testResult, needsRetest: result.testResult?.status !== "passed", parameters: result.testResult?.parameters || current.parameters }));
+      updateSkillInputs(result.skill, current => ({ ...current, paths: runPaths, testResult: result.testResult,
+        needsRetest: result.testResult?.status !== "passed", parameters: result.testResult?.parameters || runParameters }));
       await refreshTools();
     } catch (reason) { setError(String(reason)); }
     finally { setBusy("idle"); testingId.current = undefined; setTestProgress(undefined); }
@@ -1437,7 +1448,7 @@ function SkillsWorkspace({
                   onParameter={(key, value) => changeSelectedInputs(current => ({ ...current, parameters: { ...current.parameters, [key]: value } }))}
                   onAdd={() => void addRunFiles()} onTest={() => void runSkillTest()}
                   onRemove={path => changeSelectedInputs(current => ({ ...current, paths: current.paths.filter(item => item !== path) }))}
-                  onRepair={isWebApiEnabled() ? undefined : () => void runSkillTest(true)} onOpen={path => void revealInFinder(path).catch(reason => setError(String(reason)))} />
+                  onRepair={() => void runSkillTest(true)} onOpen={path => void revealInFinder(path).catch(reason => setError(String(reason)))} />
               )}
               {selectedSkill.available &&
                 (selectedSkill.status ?? "published") === "published" && (

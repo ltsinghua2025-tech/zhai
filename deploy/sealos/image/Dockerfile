@@ -10,7 +10,7 @@ RUN test "$(uname -m)" = aarch64 && python3 -c "import sys; assert sys.version_i
 FROM ${BASE}
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 OPENSSL_armcap=0 \
-    ZHAI_WEB_HOST=0.0.0.0 ZHAI_WEB_PORT=8080 ZHAI_JUDGE_MODE=1 ZHAI_WEB_REVISION=r1 \
+    ZHAI_WEB_HOST=0.0.0.0 ZHAI_WEB_PORT=8080 ZHAI_JUDGE_MODE=1 ZHAI_WEB_REVISION=r2 \
     ZHAI_DATA_DIR=/app/zhai/data ZHAI_CONFIG_FILE=/run/zhai/private-config.json
 COPY --from=dependencies /app/zhai/.venv /app/zhai/.venv
 COPY zhai/ /app/zhai/

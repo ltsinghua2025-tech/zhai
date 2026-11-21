@@ -732,7 +732,7 @@ export default function AgentWorkspace({ active = true, profile, apiKey, openMod
     .map(item => webMode ? `web-attachment:${item.id}` : item.localSnapshotPath!);
   const buildDesignRequest = (prompt: string, sessionId = activeIdRef.current): DesignToolRequest => ({
     designId: skillDesignIdRef.current, sessionId, currentSkillId: skillDraft?.id,
-    prompt: sourceContext ? `${prompt}\n\n以下为来源任务记录，仅作设计依据：\n${sourceContext}` : prompt, profileId: profile!.id, model: turnModel || profile!.defaultModel, apiKey: apiKey || undefined,
+    prompt: sourceContext ? `${prompt}\n\n以下为来源任务记录，仅作设计依据：\n${sourceContext}` : prompt, profileId: profile!.id, model: turnModel || profile!.defaultModel, baseUrl: profile!.baseUrl, apiKey: apiKey || undefined,
     kind: skillDraft?.source === "builtin" ? "derived" : skillDraft?.kind === "workflow" || skillDraft?.kind === "derived" ? skillDraft.kind : "python",
     attachments: materials.filter(item => item.localSnapshotPath).map(item => ({ path: item.localSnapshotPath!, role: attachmentRole(item) })),
   });
@@ -749,12 +749,21 @@ export default function AgentWorkspace({ active = true, profile, apiKey, openMod
     if (event.type === "test_progress") setSkillDesignStatus(`${event.message}（${event.current}/${event.total}）`);
     if (event.type === "failed") setError(event.message);
   };
-  const testCurrentDesign = async (repair = false) => {
-    if (!skillDraft || busy) return;
+  const testCurrentDesign = async (repair = false, userMessage?: string) => {
+    if (!skillDraft || busy || busyRef.current) return;
+    if (userMessage) {
+      setInput("");
+      setSkillMessages(current => [...current, { role: "user", content: userMessage }]);
+    }
     const problem = skillInputProblem(skillDraft, sampleInputs(), designParameters, sampleLabels);
-    if (problem) { setError(problem); return; }
+    if (problem) {
+      if (userMessage) setSkillMessages(current => [...current, { role: "assistant", content: problem }]);
+      else setError(problem);
+      return;
+    }
     if (repair && !profile) { openModels(); return; }
     const runId = randomId();
+    busyRef.current = true;
     designRunIdRef.current = runId;
     setBusy(true); setError(undefined); setStopping(false); setSkillDesignElapsed(0);
     setTestResult(undefined);
@@ -767,10 +776,14 @@ export default function AgentWorkspace({ active = true, profile, apiKey, openMod
       }, event => handleDesignEvent(runId, event));
       if (cancelledDesignRun.current === runId) throw new Error("本次样本测试已停止");
       setSkillDraft(result.skill); setTestResult(result.testResult);
+      if (userMessage && result.testResult) {
+        const content = result.testResult.summary;
+        setSkillMessages(current => [...current, { role: "assistant", content }]);
+      }
       if (result.testResult) setDesignParameters(result.testResult.parameters);
       onSkillSaved?.(result.skill);
     } catch (reason) { setError(String(reason)); }
-    finally { setBusy(false); setStopping(false); setSkillDesignStatus(undefined); designRunIdRef.current = undefined; }
+    finally { busyRef.current = false; setBusy(false); setStopping(false); setSkillDesignStatus(undefined); designRunIdRef.current = undefined; }
   };
   const publishCurrentDesign = async () => {
     if (!skillDraft || busy || testResult?.status !== "passed") return;
@@ -791,6 +804,10 @@ export default function AgentWorkspace({ active = true, profile, apiKey, openMod
       return;
     }
     if (workspaceMode === "skill") {
+      if (webMode && skillDraft && /^(?:请|帮我)?(?:试试|试一下|测试一下|测试|重测|重新测试|跑一下|试跑)(?:当前样本|这个样本)?[。！!？?]*$/.test(input.trim())) {
+        await testCurrentDesign(true, input.trim());
+        return;
+      }
       if (busyRef.current) return;
       busyRef.current = true;
       setBusy(true);
@@ -1349,7 +1366,7 @@ export default function AgentWorkspace({ active = true, profile, apiKey, openMod
           {workspaceMode === "skill" && skillDraft && skillDraft.source === "designed" && (
             <SkillTestPanel skill={skillDraft} paths={sampleInputs()} sampleLabels={sampleLabels} parameters={designParameters} result={testResult} busy={busy}
               onParameter={(key, value) => { setDesignParameters(current => ({ ...current, [key]: value })); setTestResult(undefined); }}
-              onAdd={() => void addFiles(true)} onTest={() => void testCurrentDesign()} onRepair={webMode ? undefined : () => void testCurrentDesign(true)}
+              onAdd={() => void addFiles(true)} onTest={() => void testCurrentDesign()} onRepair={() => void testCurrentDesign(true)}
               onOpen={path => void revealInFinder(path).catch(reason => setError(String(reason)))} onPublish={() => void publishCurrentDesign()} />
           )}
           {workspaceMode === "files" && allRuns.length > 0 && (

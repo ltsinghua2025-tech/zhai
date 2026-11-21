@@ -14,6 +14,22 @@ async function choose(files: File[]) {
 
 afterEach(() => vi.unstubAllGlobals());
 
+it("opts into model repair for the same test inputs without sending other design attachments", async () => {
+  const requests: Record<string, unknown>[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+    requests.push(JSON.parse(String(init.body)));
+    return Response.json({testStatus: "passed"});
+  }));
+  const paths = ["web-attachment:sample"];
+  await webTestSkill("worksheet", paths, {value: 17}, "offline");
+  await webTestSkill("worksheet", paths, {value: 17}, "repair", {
+    prompt: "填写人数", profileId: "test", model: "fixture", attachments: [{path: "unused-template", role: "template"}],
+  });
+  expect(requests[0]).not.toHaveProperty("repair");
+  expect(requests[1]).toEqual({files: [{attachmentId: "sample"}], parameters: {value: 17}, designRunId: "repair",
+    repair: {prompt: "填写人数", model: "fixture"}});
+});
+
 it("sends each File as a separate upload and reuses test references when running", async () => {
   const files = [new File(["one"], "甲.xlsx"), new File(["two"], "乙.xlsx")];
   const token = await choose(files);

@@ -19,7 +19,7 @@ VITE_WEB_API=1 node --input-type=module -e \
 python3 deploy/sealos/image/prepare.py --frontend .build/sealos/dist \
   --offline-zip .build/sealos/wheels.zip --context .build/sealos/context
 docker buildx build --platform linux/arm64 --network none --load \
-  -t zhai-web:0.29.0-arm64-r1 .build/sealos/context
+  -t zhai-web:0.29.0-arm64-r2 .build/sealos/context
 ```
 
 首次构建需要取得 Dockerfile 固定摘要的 Python 基础镜像。生成上下文时请使用新目录。准备脚本核对依赖清单及每个 wheel 的摘要，镜像内离线安装。运行时无需重新安装依赖。
