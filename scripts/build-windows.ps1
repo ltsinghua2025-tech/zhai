@@ -207,15 +207,63 @@ try {
                 foreach ($binary in 'soffice.com','soffice.exe','soffice.bin') {
                     Add-TestProgramBlock (Join-Path $officeDir $binary)
                 }
-                $legacyTemp = Join-Path $scratch 'legacy-acceptance'
+                $legacyTemp = Join-Path "$($env:SystemDrive)\" ('zl-' + [guid]::NewGuid().ToString('N').Substring(0,8))
                 New-Item -ItemType Directory -Path $legacyTemp | Out-Null
                 try {
                     $env:TEMP = $legacyTemp
                     $env:TMP = $legacyTemp
+                    $versionOut = Join-Path $legacyTemp 'soffice-version.txt'
+                    $versionErr = Join-Path $legacyTemp 'soffice-version-err.txt'
+                    $versionProbe = Start-Process (Join-Path $officeDir 'soffice.com') -ArgumentList '--headless','--version' -PassThru -NoNewWindow -RedirectStandardOutput $versionOut -RedirectStandardError $versionErr
+                    if (!$versionProbe.WaitForExit(30000)) {
+                        & taskkill.exe /PID $versionProbe.Id /T /F
+                        throw 'The installed LibreOffice command-line version probe did not exit within 30 seconds.'
+                    }
+                    $officeVersion = Get-Content $versionOut -Raw
+                    if ($versionProbe.ExitCode -ne 0 -or $officeVersion -notmatch 'LibreOffice') {
+                        throw "The installed soffice.com did not report a version ($($versionProbe.ExitCode)): $(Get-Content $versionErr -Raw)"
+                    }
+                    Write-Output "Offline command-line probe: $($officeVersion.Trim())"
+                    $controlDir = Join-Path $legacyTemp 'control'
+                    New-Item -ItemType Directory -Path $controlDir | Out-Null
+                    $controlDoc = Join-Path $controlDir 'legacy.doc'
+                    Copy-Item (Join-Path $reports[0].DirectoryName 'xlsx-fixtures/legacy.doc') $controlDoc
+                    $profileUri = ([System.Uri](Join-Path $controlDir 'profile')).AbsoluteUri
+                    $control = Start-Process (Join-Path $officeDir 'soffice.com') -PassThru -NoNewWindow -ArgumentList @(
+                        '--headless','--nologo','--nodefault','--norestore','--nofirststartwizard',
+                        "-env:UserInstallation=$profileUri",'--convert-to','"docx:Office Open XML Text"','--outdir',$controlDir,$controlDoc
+                    )
+                    if (!$control.WaitForExit(120000)) {
+                        & taskkill.exe /PID $control.Id /T /F
+                        throw 'Offline conversion of the binary DOC timed out in standalone LibreOffice before the installed-app check.'
+                    }
+                    $controlOutput = Join-Path $controlDir 'legacy.docx'
+                    if ($control.ExitCode -ne 0 -or !(Test-Path $controlOutput -PathType Leaf)) {
+                        throw "Standalone LibreOffice did not generate the control DOCX ($($control.ExitCode))."
+                    }
+                    Invoke-Checked $python3Env @('-c', 'import sys; from docx import Document; assert any("Office compatibility sample 6247" in p.text for p in Document(sys.argv[1]).paragraphs)', $controlOutput)
+                    Write-Output 'Standalone LibreOffice converted the genuine binary DOC while offline; reopening the control output succeeded.'
+                    $env:WEBVIEW2_USER_DATA_FOLDER = Join-Path $legacyTemp 'webview'
                     $checkLegacy = Start-Process $app -ArgumentList '--self-check','--legacy-doc-only' -PassThru
-                    if (!$checkLegacy.WaitForExit(180000)) {
-                        Stop-Process -Id $checkLegacy.Id -Force
-                        throw 'Installed-app legacy DOC conversion check timed out.'
+                    $timer = [Diagnostics.Stopwatch]::StartNew()
+                    $lastStage = ''
+                    while (!$checkLegacy.WaitForExit(15000)) {
+                        $marker = @(Get-ChildItem "$legacyTemp/zhai-self-check-*/legacy-stage.txt" -File -ErrorAction SilentlyContinue)
+                        $stage = if ($marker) { Get-Content $marker[0].FullName -Raw } else { 'opening the installed window and preparing self-check' }
+                        if ($stage -ne $lastStage) {
+                            Write-Output "Legacy DOC verification: $stage"
+                            $lastStage = $stage
+                        }
+                        if ($timer.Elapsed.TotalSeconds -ge 300) {
+                            Get-CimInstance Win32_Process |
+                                Where-Object { $_.Name -like 'soffice*' -or $_.Name -like 'material-workshop*' } |
+                                Select-Object Name,ProcessId,ParentProcessId,CommandLine | Format-List | Out-Host
+                            Get-ChildItem $legacyTemp -Recurse -File -ErrorAction SilentlyContinue |
+                                Where-Object { $_.Name -in @('request.json','report.json','legacy.doc','legacy-stage.txt') } |
+                                Select-Object FullName,Length | Format-List | Out-Host
+                            & taskkill.exe /PID $checkLegacy.Id /T /F
+                            throw "Installed-app legacy DOC conversion timed out; last stage: $stage."
+                        }
                     }
                     $proof = @(Get-ChildItem "$legacyTemp/zhai-self-check-*/report.json" -File)
                     if ($proof.Count -ne 1) { throw 'Missing legacy DOC conversion check report.' }
@@ -226,6 +274,7 @@ try {
                         throw 'The installed app did not convert and reopen the legacy DOC with the optional runtime.'
                     }
                 } finally {
+                    Remove-Item Env:WEBVIEW2_USER_DATA_FOLDER -ErrorAction SilentlyContinue
                     $env:TEMP = $originalTemp
                     $env:TMP = $originalTmp
                 }

@@ -741,6 +741,8 @@ fn check_windows(app: &AppHandle, state: &AppState, root: &Path, first: &Path, _
         "SELECT count(*) FROM ai_profiles WHERE id='zhai-tianyi' OR key_stored=1", [], |r| r.get(0)
     ).map_err(|e| e.to_string())?;
     if creds != 0 { return Err("全新离线安装发现模型授权".into()); }
+    let legacy_stage = |message: &str| fs::write(root.join("legacy-stage.txt"), message).map_err(|e| e.to_string());
+    legacy_stage("preparing synthetic DOC, XLSX and DOCX fixtures")?;
     let sheets = root.join("xlsx-fixtures");
     run_fixture_script(&root.join("make-xlsx"), r#"from openpyxl import Workbook
 from docx import Document
@@ -798,10 +800,13 @@ def run(context, params):
 "#, &root.join("empty"), &sheets)?;
     let version = app.package_info().version.to_string();
     let legacy_only = std::env::args().any(|arg| arg == "--legacy-doc-only");
+    legacy_stage("probing for a local Office converter")?;
     let converter = builtin_tools().into_iter().find(|t| t.id == "doc_to_docx").ok_or("缺少 DOC 转换能力注册")?;
     let legacy_inputs = [sheets.join("legacy.doc")];
     let legacy_check = if converter.available {
+        legacy_stage("running binary DOC to DOCX through the installed app")?;
         let path = windows_manual_output(app, state, "doc_to_docx", &legacy_inputs)?;
+        legacy_stage("reopening the delivered DOCX and verifying its paragraphs")?;
         let legacy_dir = root.join("converted-doc");
         fs::create_dir_all(&legacy_dir).map_err(|e| e.to_string())?;
         fs::copy(path, legacy_dir.join("converted.docx")).map_err(|e| e.to_string())?;

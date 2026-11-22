@@ -24,7 +24,7 @@ import subprocess
 import sys
 import tempfile
 import traceback
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -780,6 +780,77 @@ def convert_office_with_wps(source: Path, target: Path, action: str) -> dict[str
         shutil.rmtree(temporary_root, ignore_errors=True)
 
 
+@contextmanager
+def external_office_environment():
+    bundle = getattr(sys, "_MEIPASS", None)
+    if sys.platform != "win32" or not bundle:
+        yield None
+        return
+
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.GetDllDirectoryW.argtypes = [wintypes.DWORD, wintypes.LPWSTR]
+    kernel.GetDllDirectoryW.restype = wintypes.DWORD
+    kernel.SetDllDirectoryW.argtypes = [wintypes.LPCWSTR]
+    kernel.SetDllDirectoryW.restype = wintypes.BOOL
+    size = kernel.GetDllDirectoryW(0, None)
+    previous = None
+    if size:
+        buffer = ctypes.create_unicode_buffer(size)
+        if not kernel.GetDllDirectoryW(size, buffer):
+            raise ctypes.WinError(ctypes.get_last_error())
+        previous = buffer.value
+    environment = os.environ.copy()
+    bundle_path = Path(bundle).resolve()
+    environment["PATH"] = os.pathsep.join(
+        item for item in os.get_exec_path()
+        if item and not Path(item.strip('"')).resolve().is_relative_to(bundle_path)
+    )
+    # A frozen sidecar gives child processes its private DLL directory. Clear it
+    # only while spawning the system Office program, then restore the exact value.
+    if not kernel.SetDllDirectoryW(None):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        yield environment
+    finally:
+        if not kernel.SetDllDirectoryW(previous):
+            raise ctypes.WinError(ctypes.get_last_error())
+
+
+def run_libreoffice(command: list[str], directory: Path) -> tuple[int, str]:
+    # A file, unlike a pipe, lets us enforce the timeout even when a child
+    # process has inherited the launcher's stdout handle.
+    with tempfile.TemporaryFile() as log:
+        with external_office_environment() as environment:
+            process = subprocess.Popen(
+                command, cwd=directory, env=environment,
+                stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+            )
+        try:
+            code = process.wait(timeout=180)
+        except subprocess.TimeoutExpired:
+            if sys.platform == "win32":
+                taskkill = Path(os.environ["SystemRoot"]) / "System32/taskkill.exe"
+                try:
+                    with external_office_environment() as environment:
+                        subprocess.run(
+                            [str(taskkill), "/PID", str(process.pid), "/T", "/F"],
+                            env=environment, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW,
+                            timeout=10, check=False,
+                        )
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+            process.kill()
+            process.wait(timeout=10)
+            raise
+        log.seek(0)
+        return code, log.read(8192).decode("utf-8", errors="replace").strip()
+
+
 def convert_office_with_libreoffice(source: Path, target: Path, action: str) -> dict[str, Any]:
     executable = libreoffice_path()
     if executable is None:
@@ -795,16 +866,16 @@ def convert_office_with_libreoffice(source: Path, target: Path, action: str) -> 
     if action not in filters:
         raise RuntimeError(f"LibreOffice 不支持该转换动作：{action}")
     filter_name, suffix = filters[action]
-    temporary_root = target.parent / f".libreoffice-{uuid.uuid4().hex}"
-    input_root = temporary_root / "input"
-    output_root = temporary_root / "output"
-    profile_root = temporary_root / "profile"
-    input_root.mkdir(parents=True, exist_ok=False)
-    output_root.mkdir()
-    profile_root.mkdir()
-    staged_source = input_root / source.name
-    shutil.copy2(source, staged_source)
-    try:
+    # Office appends its own profile tree and may not handle extended-length
+    # Windows paths. Keep its private workspace independent of the output path.
+    with tempfile.TemporaryDirectory(prefix="zlo-") as temporary:
+        temporary_root = Path(temporary)
+        output_root = temporary_root / "o"
+        profile_root = temporary_root / "p"
+        output_root.mkdir()
+        profile_root.mkdir()
+        staged_source = temporary_root / ("input" + source.suffix if sys.platform == "win32" else source.name)
+        shutil.copyfile(source, staged_source)
         command = [
             str(executable),
             "--headless",
@@ -819,16 +890,9 @@ def convert_office_with_libreoffice(source: Path, target: Path, action: str) -> 
             str(output_root),
             str(staged_source),
         ]
-        completed = subprocess.run(
-            command,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=180,
-        )
+        code, detail = run_libreoffice(command, temporary_root)
         generated = output_root / f"{staged_source.stem}{suffix}"
-        if completed.returncode != 0 or not generated.is_file():
-            detail = (completed.stderr or completed.stdout or "LibreOffice 未生成结果").strip()
+        if code != 0 or not generated.is_file():
             raise RuntimeError(f"LibreOffice 转换失败：{detail.splitlines()[0] if detail else '未生成结果'}")
         if action in {"doc-to-pdf", "docx-to-pdf", "xlsx-to-pdf"}:
             page_count, verification = validate_pdf_conversion(source, generated)
@@ -847,8 +911,6 @@ def convert_office_with_libreoffice(source: Path, target: Path, action: str) -> 
             notes = ["LibreOffice 工作簿输出已重新打开校验"]
         atomic_writer(target, lambda temporary: shutil.copy2(generated, temporary))
         return {"changes": 1, "notes": notes, "verification": verification}
-    finally:
-        shutil.rmtree(temporary_root, ignore_errors=True)
 
 
 def convert_office(
