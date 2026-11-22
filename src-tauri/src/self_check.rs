@@ -286,7 +286,8 @@ fn legacy_staging_check(app: &AppHandle, state: &AppState, source: &Path, root: 
                 if !list_session_attachments(state, &session.id)?.iter().all(|a| a.kind != "artifact") { return Err("中间产物进入用户成果栏".into()); }
                 let last = body["messages"].as_array().and_then(|v|v.last()).and_then(|v|v["content"].as_str()).unwrap_or("");
                 if step == 1 {
-                    let catalog: Value = serde_json::from_str(last.rsplit("附件：").next().unwrap_or("")).map_err(|e|format!("未收到暂存产物目录：{e}"))?;
+                    let catalog: Value = serde_json::from_str(last.rsplit("附件：").next().unwrap_or(""))
+                        .map_err(|e| format!("自检未收到暂存产物目录：{e}；合成工具回执：{}", last.chars().take(600).collect::<String>()))?;
                     artifact_id = catalog[0]["attachmentId"].as_str().ok_or("暂存成果ID缺失")?.into();
                 } else if step == 2 {
                     structure = serde_json::from_str(last.strip_prefix("工具 read_word_structure 执行结果：").and_then(|s|s.split("\n暂存产物").next()).ok_or("未收到Word结构结果")?).map_err(|e|e.to_string())?;
@@ -715,10 +716,15 @@ fn check_windows(app: &AppHandle, state: &AppState, root: &Path, first: &Path, s
         return Err("Windows 预览版错误地启用了未适配的运行器".into());
     }
     let before = [sha256_file(first)?, sha256_file(second)?];
+    let mut failures = Vec::new();
     for mode in ["success", "failure", "cancel"] {
-        legacy_staging_check(app, state, first, &root.join(format!("compatible-{mode}")), mode)?;
+        if let Err(error) = legacy_staging_check(app, state, first, &root.join(format!("compatible-{mode}")), mode) {
+            failures.push(format!("兼容回合 {mode}：{error}"));
+        }
     }
-    check_pdf_merge_delivery(app, state, root)?;
+    if let Err(error) = check_pdf_merge_delivery(app, state, root) {
+        failures.push(format!("PDF 合并：{error}"));
+    }
     if before != [sha256_file(first)?, sha256_file(second)?] {
         return Err("自检原件发生变化".into());
     }
@@ -737,6 +743,9 @@ fn check_windows(app: &AppHandle, state: &AppState, root: &Path, first: &Path, s
         return Err("Windows 凭据读回或移除失败".into());
     }
 
+    if !failures.is_empty() {
+        return Err(failures.join("\n"));
+    }
     Ok(json!({
         "success": true,
         "version": env!("CARGO_PKG_VERSION"),

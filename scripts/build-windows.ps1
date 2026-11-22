@@ -80,8 +80,21 @@ try {
         $reportText = Get-Content -Path $reports[0].FullName -Raw -Encoding utf8
         $reportText | Write-Output
         $report = $reportText | ConvertFrom-Json
-        if ($check.ExitCode -ne 0 -or -not $report.success) {
-            throw 'Installed Windows application self-check failed.'
+        $failedSelfCheck = ($check.ExitCode -ne 0 -or -not $report.success)
+        if ($failedSelfCheck) {
+            $diagnostics = @'
+from pathlib import Path
+import sqlite3, sys
+root = Path(sys.argv[1]).parent
+path = root / "data" / "history.sqlite3"
+if path.is_file():
+    with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) as db:
+        for row in db.execute("SELECT tool_id,status,substr(detail,1,1000) FROM agent_tool_runs ORDER BY started_at"):
+            print("Synthetic tool execution:", ascii(row))
+        for row in db.execute("SELECT status,failed_files,report_path FROM jobs ORDER BY created_at"):
+            print("Synthetic file job:", ascii(row))
+'@
+            Invoke-Checked $python3 @('-c', $diagnostics, $reports[0].FullName)
         }
     } finally {
         $env:TEMP = $originalTemp
@@ -159,7 +172,10 @@ assert row == ("https://ai.ctaigw.cn/v1", 1), "Model profile was not provisioned
         throw "Expected one Rust library test executable; found $($testExecutables.Count)."
     }
     Invoke-Checked $python3Env @($inspectImports, $testExecutables[0])
-    Invoke-Checked 'cargo' ($testArgs + @('process_runner::tests', '--', '--nocapture'))
+    Invoke-Checked $testExecutables[0] @('process_runner::tests', '--nocapture')
+    if ($failedSelfCheck) {
+        throw 'Installed Windows application self-check failed. See its report above.'
+    }
 } finally {
     Pop-Location
 }
