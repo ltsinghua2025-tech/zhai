@@ -44,6 +44,8 @@ async function send(text: string) {
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "发送消息" })); });
 }
 async function addSamples(...paths: string[]) {
+  // A design target renders its test panel before its session finishes opening.
+  await waitFor(() => expect(screen.getByRole("button", { name: "新建设计会话" })).toBeEnabled());
   mocked.open.mockResolvedValueOnce(paths);
   fireEvent.click(screen.getByTitle("添加文件"));
   await screen.findByRole("combobox", { name: paths[0].split("/").pop() });

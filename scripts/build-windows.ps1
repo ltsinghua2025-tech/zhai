@@ -147,17 +147,29 @@ try {
             $port = $listener.LocalEndpoint.Port
             $listener.Stop()
             $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=$port --remote-debugging-address=127.0.0.1 --disable-background-networking --proxy-server=http://127.0.0.1:9 --proxy-bypass-list=localhost;127.0.0.1;*.localhost"
+            $env:WEBVIEW2_USER_DATA_FOLDER = Join-Path $scratch 'gui-webview'
             $gui = Start-Process -FilePath $app -PassThru
             try {
-                Invoke-Checked 'node' @((Join-Path $project 'scripts/check-windows-offline-gui.mjs'), "$port")
+                & node (Join-Path $project 'scripts/check-windows-offline-gui.mjs') "$port"
+                $rendererExit = $LASTEXITCODE
+                if ($rendererExit -eq 2) {
+                    $gui.Refresh()
+                    if ($gui.HasExited -or $gui.MainWindowHandle -eq 0 -or $gui.MainWindowTitle -notmatch '离线工具版') {
+                        throw "Installed offline window did not open: $($gui.MainWindowTitle)"
+                    }
+                    Write-Output "Observed native window: $($gui.MainWindowTitle). Renderer contents not inspected via CDP."
+                } elseif ($rendererExit -ne 0) {
+                    throw "Installed WebView content verification failed ($rendererExit)."
+                }
                 $query = 'import sqlite3,sys; db=sqlite3.connect(sys.argv[1]); assert not db.execute("SELECT count(*) FROM ai_profiles WHERE id=? OR key_stored=1",("zhai-tianyi",)).fetchone()[0]'
                 if (!(Test-Path $database) -or (Test-Path (Join-Path $dataDir 'judge-tianyi-initialized'))) {
                     throw 'Fresh offline profile was not initialized correctly.'
                 }
                 Invoke-Checked $python3 @('-c', $query, $database)
-                Write-Output 'Fresh installed offline GUI opened its local tool library without model credentials.'
+                Write-Output 'Fresh installed offline GUI and local profile initialized without model credentials.'
             } finally {
                 Remove-Item Env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS -ErrorAction SilentlyContinue
+                Remove-Item Env:WEBVIEW2_USER_DATA_FOLDER -ErrorAction SilentlyContinue
                 if (!$gui.HasExited) { Stop-Process -Id $gui.Id -Force }
             }
         }

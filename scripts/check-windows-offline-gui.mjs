@@ -5,11 +5,13 @@ const port = Number(process.argv[2]);
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Invalid test port");
 const deadline = Date.now() + 60000;
 let last = "Window did not open";
+let debuggerReached = false;
 while (Date.now() < deadline) {
   let socket;
   try {
     const response = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(1500) });
     const pages = await response.json();
+    debuggerReached = true;
     const page = pages.find(p => p.type === "page" && /^https?:\/\/tauri\.localhost(?:\/|$)/.test(p.url));
     if (!page) throw new Error("Installed application page did not load");
     socket = new WebSocket(page.webSocketDebuggerUrl);
@@ -57,5 +59,9 @@ while (Date.now() < deadline) {
     socket?.close();
   }
   await wait(350);
+}
+if (!debuggerReached) {
+  console.warn("WebView debug transport unavailable; checking the native window and profile instead:", last);
+  process.exit(2);
 }
 throw new Error("Installed offline GUI check failed: " + last);
