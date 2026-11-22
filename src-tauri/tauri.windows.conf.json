@@ -17,6 +17,11 @@
   },
   "bundle": {
     "targets": ["nsis"],
+    "windows": {
+      "nsis": {
+        "installerHooks": "../scripts/windows-installer-hooks.nsh"
+      }
+    },
     "externalBin": ["binaries/material-workshop-engine"],
     "resources": []
   }

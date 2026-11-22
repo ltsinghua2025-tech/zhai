@@ -86,6 +86,33 @@ try {
         $env:TEMP = $originalTemp
         $env:TMP = $originalTmp
     }
+
+    # Test the same bootstrap used for domestic downloads with a synthetic
+    # resource. The public installer must leave a new installation unconfigured.
+    $installedResource = Join-Path $install 'judge-tianyi.key'
+    if (Test-Path $installedResource) {
+        throw 'The ordinary installer unexpectedly included a judge credential.'
+    }
+    $compiler = Get-Command makensis -ErrorAction SilentlyContinue
+    $makensis = if ($compiler) {
+        $compiler.Source
+    } else {
+        Get-ChildItem (Join-Path $env:LOCALAPPDATA 'tauri') -Filter makensis.exe -Recurse -File |
+            Select-Object -First 1 -ExpandProperty FullName
+    }
+    if (!$makensis) {
+        throw 'Cannot find the NSIS compiler used to build the installer.'
+    }
+    $synthetic = Join-Path $scratch 'synthetic.key'
+    [IO.File]::WriteAllText($synthetic, 'synthetic-installation-test')
+    $judgeSetup = Join-Path $scratch 'judge-setup.exe'
+    Invoke-Checked $makensis @('/V2', "/DINSTALLER_FILE=$($installers[0].FullName)", "/DJUDGE_RESOURCE=$synthetic", "/DOUTPUT_FILE=$judgeSetup", (Join-Path $project 'scripts/windows-judge.nsi'))
+    $judgeInstall = Start-Process -FilePath $judgeSetup -ArgumentList '/S', "/D=$install" -Wait -PassThru
+    if ($judgeInstall.ExitCode -ne 0 -or !(Test-Path $installedResource) -or
+        (Get-FileHash $installedResource).Hash -ne (Get-FileHash $synthetic).Hash) {
+        throw 'The judge installation failed to provision its synthetic resource.'
+    }
+    Write-Output 'Judge bootstrap installed the expected synthetic resource.'
 } finally {
     Pop-Location
 }
