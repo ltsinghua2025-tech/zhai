@@ -803,10 +803,10 @@ def external_office_environment():
             raise ctypes.WinError(ctypes.get_last_error())
         previous = buffer.value
     environment = os.environ.copy()
-    bundle_path = Path(bundle).resolve()
+    bundle_path = Path(os.path.abspath(bundle))
     environment["PATH"] = os.pathsep.join(
         item for item in os.get_exec_path()
-        if item and not Path(item.strip('"')).resolve().is_relative_to(bundle_path)
+        if item and not Path(os.path.abspath(item.strip('"'))).is_relative_to(bundle_path)
     )
     # A frozen sidecar gives child processes its private DLL directory. Clear it
     # only while spawning the system Office program, then restore the exact value.
@@ -877,7 +877,7 @@ def convert_office_with_libreoffice(source: Path, target: Path, action: str) -> 
         staged_source = temporary_root / ("input" + source.suffix if sys.platform == "win32" else source.name)
         shutil.copyfile(source, staged_source)
         command = [
-            str(executable),
+            str(executable.absolute()),
             "--headless",
             "--nologo",
             "--nodefault",

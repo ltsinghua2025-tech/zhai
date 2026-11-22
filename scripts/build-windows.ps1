@@ -50,6 +50,7 @@ try {
     $python3Env = Join-Path $scratch 'python/Scripts/python.exe'
     Invoke-Checked $python3Env @('-m', 'pip', 'install', '-r', 'engine/requirements.txt', 'pyinstaller==6.16.0')
     Invoke-Checked $python3Env @('-m', 'unittest', 'discover', '-s', 'engine/tests', '-p', 'test_atomic_writer.py', '-v')
+    Invoke-Checked $python3Env @('-m', 'unittest', 'discover', '-s', 'engine/tests', '-p', 'test_external_office.py', '-v')
     $env:MATERIAL_WORKSHOP_ENGINE_NAME = "material-workshop-engine-$target"
     Push-Location (Join-Path $project 'engine')
     try {
