@@ -294,6 +294,12 @@ pub enum OperationKind {
     SetXlsxCell,
     DeleteBlankRows,
     MergeXlsx,
+    SplitXlsx,
+    ExtractXlsxText,
+    ExtractDocxText,
+    MergeDocx,
+    SplitDocx,
+    CenterDocxPageNumbers,
     CsvToXlsx,
     XlsxToCsv,
     MergeOrSplit,
@@ -3579,21 +3585,32 @@ fn libreoffice_path() -> Option<PathBuf> {
             return Some(path);
         }
     }
-    let mut candidates = vec![PathBuf::from(
-        "/Applications/LibreOffice.app/Contents/MacOS/soffice",
-    )];
-    if cfg!(target_os = "windows") {
-        for variable in ["PROGRAMFILES", "PROGRAMFILES(X86)"] {
-            if let Some(root) = std::env::var_os(variable) {
-                candidates.push(PathBuf::from(root).join("LibreOffice/program/soffice.exe"));
+    if cfg!(windows) {
+        // The .com launcher attaches a console for --version and headless conversion.
+        let mut directories: Vec<PathBuf> = ["PROGRAMFILES", "PROGRAMFILES(X86)"]
+            .into_iter()
+            .filter_map(std::env::var_os)
+            .filter(|root| !root.is_empty())
+            .map(|root| PathBuf::from(root).join("LibreOffice/program"))
+            .collect();
+        if let Some(path) = std::env::var_os("PATH") {
+            directories.extend(std::env::split_paths(&path).filter(|entry| !entry.as_os_str().is_empty()));
+        }
+        for name in ["soffice.com", "soffice.exe"] {
+            for directory in &directories {
+                let candidate = directory.join(name);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
             }
         }
+        return None;
     }
-    candidates
-        .into_iter()
-        .find(|candidate| candidate.is_file())
-        .or_else(|| find_on_path("libreoffice"))
-        .or_else(|| find_on_path("soffice"))
+    let mac_app = PathBuf::from("/Applications/LibreOffice.app/Contents/MacOS/soffice");
+    if cfg!(target_os = "macos") && mac_app.is_file() {
+        return Some(mac_app);
+    }
+    find_on_path("libreoffice").or_else(|| find_on_path("soffice"))
 }
 
 fn detect_libreoffice_capabilities_internal() -> LibreOfficeCapabilities {
@@ -4289,6 +4306,60 @@ fn builtin_tools() -> Vec<AgentTool> {
             "清理文件元数据",
             "移除作者、公司、主题、关键词等可识别元数据。",
             &["doc", "docx", "xlsx", "pdf"],
+            true,
+            local.clone(),
+            vec![],
+        ),
+        builtin_tool(
+            "extract_docx_text",
+            "读取 Word 正文",
+            "按文档顺序提取 DOCX 正文和表格文字，每份材料另存为 TXT。",
+            &["docx"],
+            true,
+            local.clone(),
+            vec![],
+        ),
+        builtin_tool(
+            "merge_docx",
+            "批量合并 Word",
+            "将两份或更多 DOCX 按文件名合并为一份，可用 01、02 等前缀指定顺序。",
+            &["docx"],
+            true,
+            local.clone(),
+            vec![],
+        ),
+        builtin_tool(
+            "split_docx",
+            "按一级标题拆分 Word",
+            "按 DOCX 中的一级标题拆出独立文档，支持一次添加多份原稿。",
+            &["docx"],
+            true,
+            local.clone(),
+            vec![],
+        ),
+        builtin_tool(
+            "center_docx_page_numbers",
+            "Word 页脚居中页码",
+            "给 DOCX 设置居中的动态页码，可先移除已有的页码域。",
+            &["docx"],
+            true,
+            local.clone(),
+            vec![tool_parameter("replaceExisting", "先移除原有页码域", "boolean", false, Some(json!(false)), None)],
+        ),
+        builtin_tool(
+            "extract_xlsx_text",
+            "读取 Excel 工作表",
+            "按表名、行列顺序把可见工作表的内容导出为一份 TXT，公式保留表达式。",
+            &["xlsx"],
+            true,
+            local.clone(),
+            vec![],
+        ),
+        builtin_tool(
+            "split_xlsx",
+            "按工作表拆分 Excel",
+            "把 XLSX 中的工作表拆成独立工作簿，支持一次添加多个工作簿。",
+            &["xlsx"],
             true,
             local.clone(),
             vec![],
@@ -6319,6 +6390,9 @@ fn execute_mature_agent_tool(
         return execute_officecli_inspection(state, session, &attachments, selected_ids.as_ref());
     }
     let mut manifest = build_agent_manifest(&session.id, &attachments, selected_ids.as_ref());
+    if tool.id == "merge_docx" {
+        manifest.files.sort_by(|left, right| left.name.cmp(&right.name));
+    }
     if manifest.files.is_empty() {
         return Err("当前会话没有该技能可处理的文件".into());
     }
@@ -10172,6 +10246,17 @@ fn operation_from_tool_step(
             true,
             merged,
         ),
+        "extract_docx_text" => (OperationKind::ExtractDocxText, "读取 Word 正文", "把正文和表格文字另存为 TXT。", false, merged),
+        "merge_docx" => {
+            if file_count < 2 {
+                return Err("合并 Word 至少需要两份 DOCX 文件。".into());
+            }
+            (OperationKind::MergeDocx, "批量合并 Word", "按文件名合并 DOCX。", false, merged)
+        }
+        "split_docx" => (OperationKind::SplitDocx, "按一级标题拆分 Word", "每章另存为独立 DOCX。", false, merged),
+        "center_docx_page_numbers" => (OperationKind::CenterDocxPageNumbers, "Word 页脚居中页码", "设置居中的动态页码。", false, merged),
+        "split_xlsx" => (OperationKind::SplitXlsx, "按工作表拆分 Excel", "每张工作表另存为独立 XLSX。", false, merged),
+        "extract_xlsx_text" => (OperationKind::ExtractXlsxText, "读取 Excel 工作表", "逐张导出可见工作表的单元格内容。", false, merged),
         "merge_xlsx" => (
             OperationKind::MergeXlsx,
             "合并 Excel 数据",

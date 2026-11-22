@@ -711,19 +711,25 @@ fn verify_matrix_output(state:&AppState,root:&Path,outputs:&[PathBuf],expected:&
 }
 
 #[cfg(windows)]
-fn windows_manual_output(app: &AppHandle, state: &AppState, skill: &str, inputs: &[PathBuf]) -> Result<PathBuf, String> {
+fn windows_manual_outputs(app: &AppHandle, state: &AppState, skill: &str, inputs: &[PathBuf], parameters: Value, expected: usize) -> Result<Vec<PathBuf>, String> {
     let hashes = inputs.iter().map(|p| sha256_file(p)).collect::<Result<Vec<_>, _>>()?;
     let result = run_skill_inner(RunSkillRequest {
         run_id: Uuid::new_v4().to_string(), skill_id: skill.into(),
         paths: inputs.iter().map(|p| p.to_string_lossy().into_owned()).collect(),
-        parameters: json!({}),
+        parameters,
     }, app.clone(), state, &Events).map_err(|e| format!("{skill}：{e}"))?;
     if hashes != inputs.iter().map(|p| sha256_file(p)).collect::<Result<Vec<_>, _>>()? {
         return Err(format!("{skill} 修改了原件"));
     }
     let outputs = artifact_paths(&result.artifacts);
-    if outputs.len() != 1 { return Err(format!("{skill} 实际生成 {} 份成果", outputs.len())); }
-    Ok(outputs[0].clone())
+    if outputs.len() != expected { return Err(format!("{skill} 应交付 {expected} 份成果，实际生成 {} 份", outputs.len())); }
+    Ok(outputs)
+}
+
+#[cfg(windows)]
+fn windows_manual_output(app: &AppHandle, state: &AppState, skill: &str, inputs: &[PathBuf]) -> Result<PathBuf, String> {
+    let mut outputs = windows_manual_outputs(app, state, skill, inputs, json!({}), 1)?;
+    Ok(outputs.remove(0))
 }
 
 #[cfg(windows)]
@@ -737,6 +743,10 @@ fn check_windows(app: &AppHandle, state: &AppState, root: &Path, first: &Path, _
     if creds != 0 { return Err("全新离线安装发现模型授权".into()); }
     let sheets = root.join("xlsx-fixtures");
     run_fixture_script(&root.join("make-xlsx"), r#"from openpyxl import Workbook
+from docx import Document
+import base64
+import zlib
+from io import BytesIO
 def run(context, params):
     outputs = []
     for name, rows in [('a', [['单位', '人数'], ['甲单位', 12]]), ('b', [['人数', '单位'], [8, '乙单位']])]:
@@ -746,8 +756,74 @@ def run(context, params):
         path = context.output_dir / (name + '.xlsx')
         book.save(path)
         outputs.append(str(path))
+    book = Workbook()
+    for sheet, title, value in [(book.active, '甲表', 12), (book.create_sheet(), '乙表', 34)]:
+        sheet.title = title
+        sheet['A1'], sheet['A2'], sheet['B2'] = '合计', value, '=A2+1'
+    path = context.output_dir / '多工作表.xlsx'
+    book.save(path)
+    outputs.append(str(path))
+    pixel = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/SsQAAAAASUVORK5CYII=')
+    for i in (1, 2):
+        doc = Document()
+        doc.add_heading(f'第{i}章', level=1)
+        doc.add_paragraph(f'正文标记{i}').runs[0].bold = True
+        doc.add_table(1, 1).cell(0, 0).text = f'表格标记{i}'
+        doc.add_picture(BytesIO(pixel))
+        path = context.output_dir / f'0{i}.docx'
+        doc.save(path)
+        outputs.append(str(path))
+    # A real OLE Word 97 document, made with textutil from two synthetic lines:
+    # "Office compatibility sample 6247" and "旧格式转换验收".
+    legacy = context.output_dir / 'legacy.doc'
+    legacy.write_bytes(zlib.decompress(base64.b64decode(
+        b'eNrtnE1ME0EUx//dlkIR6AKKFfxANCrRGFT8OBiDUVHRAIqJRy3IV9KKwaJy42LiwUSNBxNjYiDxZGI0Eq+iB2'
+        b'9+XDjICU+GRCNy4yDrf2anUr6kEKPUvt/m7czO7M5M38zsvtns64f3+cO9z4o/YRoH4MWEE4A/Ic1DWR8/sIEN'
+        b'Jm3CcRyVVEpxhJTiy6NXpkNHC166vZzPTvWojj9NycMFgjkoUieg4Zor5fg9jhOcNx4novd95qgP86POWY7keU'
+        b'HJobw2YZxvakTj3/GVU6rUmjweoqyAsNR5N20cCcLSpw4t3NrRhGY+v5vQgSguIYwY0xopEUoM3cy7zFSVF9Fn'
+        b'7sFOVGIvcvG5eX9b8FzkVmPTzft7mnNFpamFec6PiybShJy6Gi9OUQ7VhCbtvBFRzH8CbfLcN5uQU2Gd9932D2'
+        b'SNZpfm1gd78p8WDq+wQ1XFU07+1f9CWuIRFaQ3BQgim8OgnaEFr94qgarvjqVC3h5qaRN20vIL6zW5pVfZ6tGh'
+        b'HiP15lESPRbwzSx7Pw5WjTm9DNVd6TDtxhaW0sVyYrQg6xnvpLTq/SW0Ma2adV1k7nTKzXsC9Z5J781dy5dgwW'
+        b'QkxNUNzbKnXOy+yVIXHPXfTmrYn6FSomz0ZTasluFVhqe1gRxmI4HdLMdKopwGms9RGtMdWoG7kqz9INXSbpSe'
+        b'bIuPsZURXOE+pk36MFt8krFWKjemX9D5UJF1I4TRD2x4my5z6ERkk5KZdwOPPvbBa3tmpMZTSr0YtWUWLZJH/o'
+        b'HMfvSjBwUVf750NTbLJqcl+ylLVC4IgiAIgiAI6cwEV9S+7JmrS5UyfP3h2Hhdm/34Tha2bn7+Ua1RQiZPiW0W'
+        b'GSM/RI+CIAiCIAiCIAiCkKrrf2vw7eCD7SX23Xtc/28bfyLrf0EQBEEQBEEQBEFITTxmDe+F+3G8+opefSmfCf'
+        b'd/HQIMsynL4Ho3K//OPErQ5OdD+RAAhXC975WnehFlpclfxVC5HJVQVlPWUNZS1pl8JWUJ8Qn5S4a/inJo6ND+'
+        b'GEe050Unuhc0foqQ4YmXpcaQP+C6RAy42dWzXbOR0mPiO3AGYTRqr+LFkMfRm/h7krlGfwZvvBbOau+WCzjMsA'
+        b'ld2uFjNg+UuSiG5VFzaCH1I6H+DDToWqPaG6Ybx1l7yy+PG+XG0aGdTeZiC+u3zNxNtn57Sv3Tf/nC2rOP9S9U'
+        b'/6GE+gVBEIR/w0/ysRu9'
+    )))
+    outputs.append(str(legacy))
     return {'summary':'合成表格', 'outputs':outputs}
 "#, &root.join("empty"), &sheets)?;
+    let version = app.package_info().version.to_string();
+    let legacy_only = std::env::args().any(|arg| arg == "--legacy-doc-only");
+    let converter = builtin_tools().into_iter().find(|t| t.id == "doc_to_docx").ok_or("缺少 DOC 转换能力注册")?;
+    let legacy_inputs = [sheets.join("legacy.doc")];
+    let legacy_check = if converter.available {
+        let path = windows_manual_output(app, state, "doc_to_docx", &legacy_inputs)?;
+        let legacy_dir = root.join("converted-doc");
+        fs::create_dir_all(&legacy_dir).map_err(|e| e.to_string())?;
+        fs::copy(path, legacy_dir.join("converted.docx")).map_err(|e| e.to_string())?;
+        run_fixture_script(&root.join("verify-legacy"), r#"from docx import Document
+def run(context, params):
+    [doc] = context.inputs
+    text = '\n'.join(p.text for p in Document(doc).paragraphs)
+    assert 'Office compatibility sample 6247' in text and '旧格式转换验收' in text, text
+    return {'summary':'中英文正文重开验证通过','outputs':[]}
+"#, &legacy_dir, &root.join("verify-legacy/output"))?;
+        "本机转换器已将二进制 DOC 转为 DOCX 并复核内容"
+    } else {
+        if legacy_only { return Err(format!("安装转换器后仍不可用：{}", converter.availability_detail)); }
+        if windows_manual_output(app, state, "doc_to_docx", &legacy_inputs).is_ok() {
+            return Err("无可用转换器时 DOC 转换错误地报告成功".into());
+        }
+        "本机未检测到可用转换器，仅验证 DOC 转换不可用提示"
+    };
+    if legacy_only {
+        return Ok(json!({"success":true,"version":version,"edition":"windows-offline","platform":"windows",
+            "legacyDocConverted":true,"checks":[legacy_check,"原文件 SHA-256 不变"]}));
+    }
     let mut failures = Vec::new();
     let verify = root.join("office-results");
     fs::create_dir_all(&verify).map_err(|e| e.to_string())?;
@@ -761,6 +837,27 @@ def run(context, params):
     }
     if let Err(error) = check_pdf_merge_delivery(app, state, root) { failures.push(error); }
     if !failures.is_empty() { return Err(failures.join("\n")); }
+    let office_inputs = [sheets.join("02.docx"), sheets.join("01.docx")];
+    let merged = windows_manual_output(app, state, "merge_docx", &office_inputs)?;
+    fs::copy(&merged, verify.join("merged.docx")).map_err(|e| e.to_string())?;
+    let text_doc = windows_manual_output(app, state, "extract_docx_text", &office_inputs[1..])?;
+    fs::copy(&text_doc, verify.join("word.txt")).map_err(|e| e.to_string())?;
+    let excel_text = windows_manual_output(app, state, "extract_xlsx_text", &[sheets.join("多工作表.xlsx")])?;
+    fs::copy(excel_text, verify.join("excel.txt")).map_err(|e| e.to_string())?;
+    let changed = windows_manual_outputs(app, state, "replace_text", &office_inputs[1..],
+        json!({"before":"正文标记1","after":"已改正文"}), 1)?;
+    fs::copy(&changed[0], verify.join("edited.docx")).map_err(|e| e.to_string())?;
+    let numbered = windows_manual_output(app, state, "center_docx_page_numbers", &office_inputs[1..])?;
+    fs::copy(numbered, verify.join("page-number.docx")).map_err(|e| e.to_string())?;
+    for (skill, input, extension) in [
+        ("split_docx", merged, "docx"),
+        ("split_xlsx", sheets.join("多工作表.xlsx"), "xlsx")
+    ] {
+        let outputs = windows_manual_outputs(app, state, skill, &[input], json!({}), 2)?;
+        for (index, path) in outputs.iter().enumerate() {
+            fs::copy(path, verify.join(format!("part-{index}.{extension}"))).map_err(|e| e.to_string())?;
+        }
+    }
     run_fixture_script(&root.join("verify-office"), r#"from docx import Document
 from openpyxl import load_workbook
 def run(context, params):
@@ -775,11 +872,48 @@ def run(context, params):
     columns = list(rows[0])
     assert {r[columns.index('单位')]:r[columns.index('人数')] for r in rows[1:]} == {'甲单位':12,'乙单位':8}, rows
     assert any('来源' in str(h) for h in columns), columns
+    text = by_name['word.txt'].read_text(encoding='utf-8-sig')
+    assert text.index('第1章') < text.index('正文标记1') < text.index('表格标记1'), text
+    cells = by_name['excel.txt'].read_text(encoding='utf-8-sig')
+    assert cells.index('甲表') < cells.index('乙表') and all(value in cells for value in ('合计','12','34','=A2+1')), cells
+    edited = Document(by_name['edited.docx'])
+    assert [p.text for p in edited.paragraphs if p.text] == ['第1章', '已改正文']
+    footer = Document(by_name['page-number.docx']).sections[0].footer
+    assert any(p.alignment == 1 and 'PAGE' in [
+        value.strip() for value in p._p.xpath('.//w:fldSimple/@w:instr')
+    ] for p in footer.paragraphs), '没有找到居中 PAGE 域'
+    merged = Document(by_name['merged.docx'])
+    assert [p.text for p in merged.paragraphs if p.style.name == 'Heading 1'] == ['第1章', '第2章']
+    assert [t.cell(0, 0).text for t in merged.tables] == ['表格标记1', '表格标记2']
+    assert len(merged.inline_shapes) == 2
+    chapters, sheets = set(), {}
+    for i in range(2):
+        chapter = Document(by_name[f'part-{i}.docx'])
+        titles = [p.text for p in chapter.paragraphs if p.style.name == 'Heading 1']
+        assert len(titles) == 1 and titles[0] in {'第1章','第2章'}, titles
+        number = titles[0][1]
+        body = [p for p in chapter.paragraphs if p.text == f'正文标记{number}']
+        assert len(body) == 1 and any(r.bold for r in body[0].runs)
+        assert [t.cell(0, 0).text for t in chapter.tables] == [f'表格标记{number}']
+        assert len(chapter.inline_shapes) == 1
+        assert not chapter.element.body.xpath('./w:p[last()]/w:r/w:br[@w:type="page"]'), '拆出的章末留有空白页'
+        chapters.add(titles[0])
+        workbook = load_workbook(by_name[f'part-{i}.xlsx'], data_only=False)
+        assert len(workbook.sheetnames) == 1
+        sheet = workbook.active
+        assert sheet['B2'].value == '=A2+1'
+        sheets[sheet.title] = sheet['A2'].value
+        workbook.close()
+    assert chapters == {'第1章','第2章'} and sheets == {'甲表':12,'乙表':34}
     return {'summary':'重新打开 Word 和 Excel 验收通过','outputs':[]}
 "#, &verify, &root.join("verify-office/output"))?;
-    Ok(json!({"success":true,"version":env!("CARGO_PKG_VERSION"),"platform":"windows","edition":"windows-offline",
+    Ok(json!({"success":true,"version":version,"legacyDocConverted":converter.available,"platform":"windows","edition":"windows-offline",
         "checks":["全新用户无天翼授权或已保存模型凭据","能力库正式入口完成 Word 公文排版，重新打开核对标题居中和正文加粗",
                   "能力库正式入口合并两份 Excel，核对列对齐、数值及来源","能力库正式入口合并 PDF，复核三页顺序",
+                  "能力库正式入口提取 DOCX 正文和表格、精确替换正文、重开核对居中 PAGE 页码",
+                  "逆序选材按文件名合并 Word，按一级标题拆分并核对图片、表格和加粗",
+                  "导出 Excel 工作表文本、按工作表拆分，重新打开核对标题、数字和表内公式",
+                  legacy_check,
                   "各项输入原件 SHA-256 保持一致"]}))
 }
 

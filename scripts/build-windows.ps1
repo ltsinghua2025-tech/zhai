@@ -69,20 +69,32 @@ try {
     if ($TestInstaller) {
         $payload = Join-Path $scratch 'embedded-runtime'
         $sevenZip = (Get-Command 7z -ErrorAction Stop).Source
-        Invoke-Checked $sevenZip @('x', '-y', "-o$payload", $installer, '-ir!MicrosoftEdgeWebView2RuntimeInstaller.exe')
-        $runtime = @(Get-ChildItem $payload -Recurse -Filter 'MicrosoftEdgeWebView2RuntimeInstaller.exe' -File)
-        if ($runtime.Count -ne 1 -or $runtime[0].Length -lt 50MB) {
-            throw 'The NSIS contents do not contain a complete offline WebView2 installer.'
+        $config = Get-Content (Join-Path $project 'src-tauri/tauri.windows.conf.json') -Raw | ConvertFrom-Json
+        $mode = $config.bundle.windows.webviewInstallMode.type
+        $fullName = 'MicrosoftEdgeWebView2RuntimeInstaller.exe'
+        $bootstrapName = 'MicrosoftEdgeWebview2Setup.exe'
+        Invoke-Checked $sevenZip @('x', '-y', "-o$payload", $installer, "-ir!$fullName", "-ir!$bootstrapName")
+        $runtime = @(Get-ChildItem $payload -Recurse -File)
+        if ($runtime.Count -ne 1) { throw 'Expected exactly one embedded Microsoft WebView2 installer.' }
+        if ($mode -eq 'embedBootstrapper') {
+            if ($runtime[0].Name -ne $bootstrapName -or $runtime[0].Length -ge 10MB) {
+                throw 'The lightweight installer does not contain the expected small WebView2 bootstrapper.'
+            }
+        } elseif ($mode -ne 'offlineInstaller' -or $runtime[0].Name -ne $fullName -or $runtime[0].Length -lt 50MB) {
+            throw 'The NSIS contents do not match the configured WebView2 install mode.'
         }
         $signature = Get-AuthenticodeSignature $runtime[0].FullName
         if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') {
             throw 'The embedded WebView2 runtime lacks a valid Microsoft signature.'
         }
-        Write-Output "Embedded Microsoft offline WebView2 installer verified: $($runtime[0].Length) bytes, SHA256 $((Get-FileHash $runtime[0].FullName).Hash)"
+        Write-Output "Verified Microsoft WebView2 package ($mode): $($runtime[0].Length) bytes, SHA256 $((Get-FileHash $runtime[0].FullName).Hash)"
         $webviewPath = Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'Microsoft/EdgeWebView/Application'
         $installedWebviews = @(Get-ChildItem $webviewPath -Directory -ErrorAction SilentlyContinue |
             Where-Object { Test-Path (Join-Path $_.FullName 'msedgewebview2.exe') } | Select-Object -ExpandProperty Name)
         Write-Output "WebView2 versions present before installation: $($installedWebviews -join ', ')"
+        if ($mode -eq 'embedBootstrapper' -and $installedWebviews.Count -eq 0) {
+            throw 'Offline installation of the lightweight package requires an existing WebView2 runtime on this test machine.'
+        }
         $install = Join-Path $scratch 'install'
         $app = Join-Path $install 'material-workshop-desktop.exe'
         $engine = Join-Path $install 'material-workshop-engine.exe'
@@ -119,7 +131,7 @@ try {
             $env:TEMP = $scratch
             $env:TMP = $scratch
             $check = Start-Process -FilePath $app -ArgumentList '--self-check' -PassThru
-            if (!$check.WaitForExit(180000)) {
+            if (!$check.WaitForExit(360000)) {
                 Stop-Process -Id $check.Id -Force
                 throw 'Installed offline application self-check timed out.'
             }
@@ -171,6 +183,52 @@ try {
                 Remove-Item Env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS -ErrorAction SilentlyContinue
                 Remove-Item Env:WEBVIEW2_USER_DATA_FOLDER -ErrorAction SilentlyContinue
                 if (!$gui.HasExited) { Stop-Process -Id $gui.Id -Force }
+            }
+
+            if ($report.legacyDocConverted) {
+                Write-Output 'The initial test already used a local converter to validate a real binary DOC.'
+            } else {
+                # This optional runtime is installed on the CI machine only, after building and testing the clean package.
+                $msi = Join-Path $scratch 'libreoffice-x64.msi'
+                $url = 'https://download.documentfoundation.org/libreoffice/stable/26.8.3/win/x86_64/LibreOffice_26.8.3_Win_x86-64.msi'
+                $expected = '0E6918C273EABBDBBD800EE0DACBBF130A14C13C2E4CEC861B06DD59E015BF94'
+                Write-Output 'Installing the official LibreOffice 26.8.3 x64 runtime on the CI machine for the conditional DOC conversion test.'
+                Invoke-Checked 'curl.exe' @('--noproxy', '*', '--fail', '--location', '--silent', '--show-error', '--retry', '2', '--retry-max-time', '300', '--max-time', '240', '--output', $msi, $url)
+                if ((Get-FileHash $msi -Algorithm SHA256).Hash -ne $expected) { throw 'LibreOffice MSI hash mismatch.' }
+                $signature = Get-AuthenticodeSignature $msi
+                if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'The Document Foundation') {
+                    throw "LibreOffice MSI publisher verification failed: $($signature.Status) $($signature.SignerCertificate.Subject)"
+                }
+                $installOffice = Start-Process msiexec.exe -ArgumentList '/i', $msi, '/qn', '/norestart', 'REGISTER_NO_MSO_TYPES=1' -PassThru
+                if (!$installOffice.WaitForExit(300000) -or $installOffice.ExitCode -notin 0,3010) {
+                    throw "LibreOffice installation on the CI machine failed or timed out: $($installOffice.ExitCode)"
+                }
+                $officeDir = Join-Path $env:ProgramFiles 'LibreOffice/program'
+                foreach ($binary in 'soffice.com','soffice.exe','soffice.bin') {
+                    Add-TestProgramBlock (Join-Path $officeDir $binary)
+                }
+                $legacyTemp = Join-Path $scratch 'legacy-acceptance'
+                New-Item -ItemType Directory -Path $legacyTemp | Out-Null
+                try {
+                    $env:TEMP = $legacyTemp
+                    $env:TMP = $legacyTemp
+                    $checkLegacy = Start-Process $app -ArgumentList '--self-check','--legacy-doc-only' -PassThru
+                    if (!$checkLegacy.WaitForExit(180000)) {
+                        Stop-Process -Id $checkLegacy.Id -Force
+                        throw 'Installed-app legacy DOC conversion check timed out.'
+                    }
+                    $proof = @(Get-ChildItem "$legacyTemp/zhai-self-check-*/report.json" -File)
+                    if ($proof.Count -ne 1) { throw 'Missing legacy DOC conversion check report.' }
+                    $json = Get-Content $proof[0].FullName -Raw -Encoding utf8
+                    Write-Output $json
+                    $result = $json | ConvertFrom-Json
+                    if ($checkLegacy.ExitCode -ne 0 -or !$result.success -or !$result.legacyDocConverted) {
+                        throw 'The installed app did not convert and reopen the legacy DOC with the optional runtime.'
+                    }
+                } finally {
+                    $env:TEMP = $originalTemp
+                    $env:TMP = $originalTmp
+                }
             }
         }
     }

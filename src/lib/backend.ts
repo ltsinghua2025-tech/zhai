@@ -758,6 +758,28 @@ function selectedFileIdsOrDefault(plan: TaskPlan) {
 }
 
 const mockBuiltinTools: AgentTool[] = [
+  ...([
+    ["extract_docx_text", "读取 Word 正文", "按文档顺序把正文和表格文字另存为 TXT。", "docx"],
+    ["merge_docx", "批量合并 Word", "按文件名合并至少两份 DOCX，可用 01、02 指定顺序。", "docx"],
+    ["split_docx", "按一级标题拆分 Word", "把各章另存为独立的 DOCX。", "docx"],
+    ["split_xlsx", "按工作表拆分 Excel", "将工作表另存为独立的 XLSX。", "xlsx"],
+    ["extract_xlsx_text", "读取 Excel 工作表", "将可见工作表中的文字、数值和公式原文另存为 TXT。", "xlsx"],
+  ] as const).map(([id, name, description, extension]): AgentTool => ({
+    id, name, description, source: "builtin", supportedExtensions: [extension],
+    available: true, availabilityDetail: "内置离线引擎可用",
+    parameters: [], steps: [{ toolId: id, parameters: {} }],
+  })),
+  {
+    id: "center_docx_page_numbers",
+    name: "Word 页脚居中页码",
+    description: "设置居中的动态页码，可先移除已有的页码域。",
+    source: "builtin",
+    supportedExtensions: ["docx"],
+    available: true,
+    availabilityDetail: "内置离线引擎可用",
+    parameters: [{ key: "replaceExisting", label: "先移除原有页码域", type: "boolean", required: false, defaultValue: false }],
+    steps: [{ toolId: "center_docx_page_numbers", parameters: {} }],
+  },
   {
     id: "citizen_reply",
     name: "12345 市民回复",

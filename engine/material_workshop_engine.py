@@ -685,16 +685,22 @@ def wps_bridge_path() -> Path | None:
 
 
 def libreoffice_path() -> Path | None:
-    candidates: list[Path] = []
     configured = os.environ.get("MATERIAL_WORKSHOP_LIBREOFFICE")
-    if configured:
-        candidates.append(Path(configured))
+    if configured and Path(configured).is_file():
+        return Path(configured)
+    if sys.platform == "win32":
+        roots = [os.environ.get(key) for key in ("PROGRAMFILES", "PROGRAMFILES(X86)")]
+        directories = [Path(root) / "LibreOffice/program" for root in roots if root]
+        directories.extend(Path(entry) for entry in os.get_exec_path() if entry)
+        for name in ("soffice.com", "soffice.exe"):
+            for directory in directories:
+                candidate = directory / name
+                if candidate.is_file():
+                    return candidate
+        return None
+    candidates: list[Path] = []
     if sys.platform == "darwin":
         candidates.append(Path("/Applications/LibreOffice.app/Contents/MacOS/soffice"))
-    elif os.name == "nt":
-        for variable in ("PROGRAMFILES", "PROGRAMFILES(X86)"):
-            if os.environ.get(variable):
-                candidates.append(Path(os.environ[variable]) / "LibreOffice/program/soffice.exe")
     for name in ("libreoffice", "soffice"):
         resolved = shutil.which(name)
         if resolved:
@@ -2081,6 +2087,53 @@ class FileResult:
     error: str | None = None
 
 
+def run_office_batch(kind: str, items: list[dict[str, Any]], output_root: Path) -> list[FileResult]:
+    from office_batches import export_text, export_workbook_text, file_label, merge_documents, split_document, split_workbook
+
+    paths = [Path(item["path"]) for item in items]
+    extension = ".xlsx" if kind in {"split_xlsx", "extract_xlsx_text"} else ".docx"
+    if not paths or any(not p.is_absolute() or not p.is_file() or p.suffix.lower() != extension for p in paths):
+        raise ValueError(f"请选择有效的 {extension.upper()} 文件。")
+    before = {path: checksum(path) for path in paths}
+    first = items[0]
+    name = Path(first.get("relativePath") or first.get("name") or paths[0].name).name
+    stem = file_label(Path(name).stem)
+    staged = []
+    published = []
+    with tempfile.TemporaryDirectory(prefix=".office-", dir=output_root) as scratch:
+        directory = Path(scratch)
+        if kind == "merge_docx":
+            staged = [directory / "合并材料.docx"]
+            notes = merge_documents(paths, staged[0])
+        elif kind == "extract_docx_text":
+            staged = [directory / f"{stem}-正文.txt"]
+            notes = export_text(paths[0], staged[0])
+        elif kind == "extract_xlsx_text":
+            staged = [directory / f"{stem}-工作表.txt"]
+            notes = export_workbook_text(paths[0], staged[0])
+        elif kind == "split_docx":
+            staged = split_document(paths[0], stem, directory)
+            notes = [f"按一级标题拆出 {len(staged)} 份，已重新打开核对各章正文。"]
+        else:
+            staged = split_workbook(paths[0], stem, directory)
+            notes = [f"按工作表拆出 {len(staged)} 份，保留单元格和表内公式。公式缓存由表格软件打开时重算。"]
+        if any(checksum(path) != value for path, value in before.items()):
+            raise ValueError("处理期间原文件发生变化，未交付本次结果。")
+        try:
+            for path in staged:
+                target = unique_output_path(output_root, Path(path.name))
+                path.replace(target)
+                published.append(target)
+        except OSError:
+            for path in published:
+                path.unlink(missing_ok=True)
+            raise
+    return [FileResult(file_id=first["id"], source=str(paths[0]), output=str(path),
+                       status="completed", changes=1, notes=notes, verification="reopened_and_verified",
+                       source_sha256_before=before[paths[0]], source_sha256_after=before[paths[0]])
+            for path in published]
+
+
 def process_file(
     item: dict[str, Any],
     output_root: Path,
@@ -2476,7 +2529,23 @@ def run(request: dict[str, Any]) -> dict[str, Any]:
     skips = list(request.get("skips") or [])
     results: list[FileResult] = []
 
-    if "merge_xlsx" in operation_kinds:
+    office_batches = operation_kinds & {"extract_docx_text", "extract_xlsx_text", "merge_docx", "split_docx", "split_xlsx"}
+    if office_batches:
+        if len(operation_kinds) != 1 or ai_reviews:
+            raise ValueError("Word、Excel 的提取、合并和拆分工具须单独运行。")
+        kind = next(iter(office_batches))
+        groups = [files] if kind == "merge_docx" or not files else [[item] for item in files]
+        for group in groups:
+            identifier = group[0]["id"] if group else "__batch__"
+            try:
+                results.extend(run_office_batch(kind, group, output_root))
+                emit({"type": "file_progress", "fileId": identifier, "progress": 100, "message": "处理并校验完成"})
+            except Exception as exc:  # A rejected workbook does not stop other selected workbooks.
+                message = str(exc) or exc.__class__.__name__
+                results.append(FileResult(file_id=identifier, source=group[0]["path"] if group else "",
+                                          output=None, status="failed", error=message))
+                emit({"type": "file_failed", "fileId": identifier, "message": message})
+    elif "merge_xlsx" in operation_kinds:
         try:
             merged_path, row_count, source_count = merge_xlsx_files(
                 files,
