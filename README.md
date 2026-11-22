@@ -8,21 +8,23 @@ ZHAI 可以批量排版 Word、公文套红、合并 Excel 和处理 PDF。经�
 
 ## 下载与安装
 
-银河麒麟 ARM64 安装包、评审安装说明和校验值见 [Linux 0.29.0-2 下载页](https://github.com/ltsinghua2025-tech/zhai/releases/tag/v0.29.0-2-linux)。macOS Apple Silicon 安装包见 [Mac 0.28.2](https://github.com/ltsinghua2025-tech/zhai/releases/tag/v0.28.2)。
+评委请打开下载说明，按电脑系统选择安装包。两个入口中的评委下载按钮均指向腾讯云，可免登录下载。银河麒麟和 Mac 评委版均已配置天翼，安装后即可使用联网文件 Agent。[国内入口（腾讯文档）](https://docs.qq.com/doc/DYktkWlJXZklUTEdZ) · [GitHub 下载页](https://ltsinghua2025-tech.github.io/zhai/download/)
 
 | 系统 | 适用范围 | 安装包 |
 | --- | --- | --- |
-| macOS | macOS 13 或以上，Apple Silicon | `.dmg` |
-| Linux | 银河麒麟 V10 SP1 兼容目标，ARM64，使用 WebKitGTK 4.0 | `.deb` |
-| Windows | Windows 10/11，x64，需 WebView2 | 预览 `.exe`（见发布页） |
+| 银河麒麟 · 推荐版 | V10 SP1，ARM64 | 0.29.0-2 评委 ZIP。完整解压，在含有 `安装.sh` 的文件夹打开终端，执行 `bash 安装.sh`。 |
+| Mac · 测试版 | Apple 芯片（M 系列），macOS 13 或更新 | 0.29.0 评委 DMG。打开后将 `zhai.app` 拖入「应用程序」，首次启动会自动配置天翼。 |
+| Windows · 测试版 | Windows 10 / 11，x64，需 WebView2 | 0.29.0 待发布。原生安装包通过验收后会更新到同一下载页。 |
 
-将 macOS 镜像中的 `zhai.app` 拖入「应用程序」。此版本使用本地签名，未经 Apple 公证。手动安装 Linux 主程序时执行 `sudo apt install ./zhai_0.29.0-2_arm64.deb`；需要扫描识字或升级已装 OCR 时，同时指定 `./zhai-ocr_0.29.0-2_arm64.deb`。目标系统为银河麒麟 V10 SP1 ARM64。安装与功能测试在 Ubuntu 20.04 ARM64 对照环境完成。Windows 预览提供离线能力包和兼容接口执行。
+Mac 测试版使用本地签名。首次打开若提示无法验证开发者，可在「系统设置 → 隐私与安全性」选择「仍要打开」。GitHub 另有自行配置模型的通用版和校验值。[Mac 0.29.0 测试版发行说明](https://github.com/ltsinghua2025-tech/zhai/releases/tag/v0.29.0-macos-beta)
+
+麒麟版安装与功能测试在 Ubuntu 20.04 ARM64 对照环境完成。需要手动安装 DEB 时，可执行 `sudo apt install ./zhai_0.29.0-2_arm64.deb`，安装或升级 OCR 时在同一命令中加入 `./zhai-ocr_0.29.0-2_arm64.deb`。[银河麒麟 0.29.0-2 发行说明与校验值](https://github.com/ltsinghua2025-tech/zhai/releases/tag/v0.29.0-2-linux)
 
 ## 配置自己的 API
 
-使用联机文件 Agent 时，在「模型服务」添加 DeepSeek 或兼容接口，填写服务地址、模型 ID 和自己账户的 API Key，先点「测试连接」。自定义兼容接口的地址和模型 ID 以服务商的文档或模型列表为准。首次启动即可在「能力包」直接试用离线功能。
+使用通用版或希望接入自己的模型时，在「模型服务」添加 DeepSeek 或兼容接口，填写服务地址、模型 ID 和自己账户的 API Key，再点「测试连接」。自定义兼容接口的地址和模型 ID 以服务商的文档或模型列表为准。首次启动即可在「能力包」直接试用离线功能。
 
-Linux 0.29.0-2 预设天翼云。应用会实测网关能否调用工具并接收结果。通过后，内置 Codex CLI 0.171.0 可连续选工具、试跑，在同一轮根据实际错误调整做法。可以直接「设计能力包」，也可以把普通对话中成功的文件任务保存为测试版，换样本验证后再发布。
+麒麟与 Mac 的 0.29.0 系列使用内置 Codex CLI 0.171.0。应用会实测网关能否调用工具并接收结果。通过后，Agent 可连续选工具、试跑，在同一轮根据实际错误调整做法。可以直接「设计能力包」，也可以把普通对话中成功的文件任务保存为测试版，换样本验证后再发布。
 
 公开版随附通用的市民诉求答复示例。使用真实材料前，按所在单位规定核对所用模型服务的访问权限和材料授权。
 

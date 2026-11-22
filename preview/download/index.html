@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex, nofollow">
-  <title>zhai 桌面版下载 · 银河麒麟 ARM64</title>
+  <title>zhai 桌面版下载 · 银河麒麟、Mac 与 Windows</title>
   <style>
     :root { color-scheme: light; font-family: system-ui, "Microsoft YaHei", sans-serif; color: #19332d; background: #f6f8f5; }
     * { box-sizing: border-box; }
@@ -18,20 +18,41 @@
     section { border-top: 1px solid #dce4de; margin-top: 34px; padding-top: 12px; }
     h2 { font-size: 1.18rem; } ol { margin: 0; padding-inline-start: 1.6em; } li + li { margin-top: .5em; }
     code { white-space: nowrap; background: #f0f4f0; padding: .15em .4em; border-radius: 4px; } 
+    .other { display: inline; padding: 0; background: transparent; color: #195440; text-decoration: underline; }
+    .other:hover { background: transparent; color: #092f24; }
+    .platform { margin-bottom: .25em; font-size: 1.4rem; }
+    .platform + p { margin-top: .3em; }
   </style>
 </head>
 <body>
   <main>
-    <h1>zhai 桌面版</h1>
-    <p class="details">银河麒麟 V10 SP1 · ARM64<br>版本 0.29.0-2 · ZIP · 259 MiB</p>
+    <h1>zhai 桌面版下载</h1>
+    <p class="details">按评审电脑的操作系统选择安装包。推荐使用银河麒麟版。</p>
+    <h2 class="platform">银河麒麟 · 推荐版</h2>
+    <p>V10 SP1 · ARM64 · 0.29.0-2 · ZIP · 259 MiB</p>
     <a href="https://zhai-linux-judges-1300080386.cos.ap-guangzhou.myqcloud.com/zhai-%E9%93%B6%E6%B2%B3%E9%BA%92%E9%BA%9FARM64-0.29.0-2-%E5%8D%95%E4%BD%8D%E8%87%AA%E7%94%A8.zip" rel="nofollow noreferrer">下载安装包</a>
     <section>
-      <h2>安装与使用</h2>
+      <h2>麒麟安装步骤</h2>
       <ol>
         <li>完整解压 ZIP，打开含有 <code>安装.sh</code> 的文件夹。</li>
         <li>在该文件夹中打开终端，运行 <code>bash 安装.sh</code>。</li>
         <li>安装完成后，从应用菜单打开 <strong>zhai</strong>。天翼 API 已配置，可直接开始使用。</li>
       </ol>
+    </section>
+    <section>
+      <h2 class="platform">Mac · 测试版</h2>
+      <p>Apple 芯片（M 系列）· macOS 13 或更新系统 · 0.29.0</p>
+      <a href="https://zhai-linux-judges-1300080386.cos.ap-guangzhou.myqcloud.com/zhai-macos-arm64-0.29.0-beta-judges.dmg">下载 Mac 评委版 · DMG</a>
+      <p>打开 DMG，将 zhai 拖到「应用程序」后启动。评委版首次打开会自动配置天翼。此测试版使用本地签名，若系统提示无法验证开发者，可到「系统设置 → 隐私与安全性」选择「仍要打开」。</p>
+      <p><a class="other" href="https://github.com/ltsinghua2025-tech/zhai/releases/tag/v0.29.0-macos-beta">GitHub 通用版与校验值</a></p>
+    </section>
+    <section>
+      <h2 class="platform">Windows · 测试版</h2>
+      <p>Windows 10 / 11 · x64 · 0.29.0</p>
+      <p>安装包待发布，原生安装验收通过后会在此提供下载。Windows 测试范围包括内置文件处理和兼容模型接口。</p>
+    </section>
+    <section>
+      <p><a class="other" href="https://docs.qq.com/doc/DYktkWlJXZklUTEdZ">腾讯文档下载说明</a> · <a class="other" href="https://github.com/ltsinghua2025-tech/zhai">GitHub 源码</a></p>
     </section>
   </main>
 </body>
