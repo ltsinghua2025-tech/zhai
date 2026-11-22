@@ -156,6 +156,7 @@ function getToolCategory(
 
 function App() {
   const webMode = isWebApiEnabled();
+  const offlineOnly = import.meta.env.VITE_WINDOWS_OFFLINE === "1";
   const [webVersion, setWebVersion] = useState("");
   useEffect(() => {
     if (!webMode) return;
@@ -165,7 +166,7 @@ function App() {
     }).catch(() => {});
     return () => { active = false; };
   }, [webMode]);
-  const [view, setView] = useState<View>("agent");
+  const [view, setView] = useState<View>(offlineOnly ? "skills" : "agent");
   const [tools, setTools] = useState<AgentTool[]>([]);
   const [profiles, setProfiles] = useState<AiProfile[]>([]);
   const [activeProfile, setActiveProfile] = useState<AiProfile>();
@@ -189,11 +190,12 @@ function App() {
 
   const refreshTools = async () => {
     const items = await listAgentTools();
-    setTools(items);
+    setTools(offlineOnly ? items.filter(isRunnableOfflineTool) : items);
   };
 
   useEffect(() => {
     refreshTools().catch((reason) => setError(String(reason)));
+    if (offlineOnly) return;
     listAiProfiles()
       .then((items) => {
         setProfiles(items);
@@ -217,19 +219,19 @@ function App() {
           </div>
         </div>
         <nav aria-label="主导航">
-          <NavButton
+          {!offlineOnly && <NavButton
             active={view === "agent"}
             icon={<Robot size={18} />}
             label="文件 Agent"
             onClick={() => setView("agent")}
-          />
+          />}
           <NavButton
             active={view === "skills"}
             icon={<Package size={18} />}
-            label="能力包"
+            label={offlineOnly ? "离线工具" : "能力包"}
             onClick={() => setView("skills")}
           />
-          {!activeProfile?.managed && <NavButton
+          {!offlineOnly && !activeProfile?.managed && <NavButton
             active={view === "models"}
             icon={<Cloud size={18} />}
             label="模型服务"
@@ -238,7 +240,7 @@ function App() {
         </nav>
         <div className="rail-note">
           <Sparkle size={16} weight="fill" />
-          <strong>定制你的办公AI</strong>
+          <strong>{offlineOnly ? "Windows 离线工具版" : "定制你的办公AI"}</strong>
         </div>
       </aside>
 
@@ -255,7 +257,7 @@ function App() {
             </span>
           </div>
         )}
-        <div
+        {!offlineOnly && <div
           className={`persistent-agent-view ${view === "agent" ? "is-active" : ""}`}
           hidden={view !== "agent"}
         >
@@ -269,10 +271,11 @@ function App() {
             startInDesignMode={Boolean(designTarget)}
             onSkillSaved={() => refreshTools().catch((reason) => setError(String(reason)))}
           />
-        </div>
+        </div>}
         {view === "skills" && (
           <SkillsWorkspace
             tools={tools}
+            offlineOnly={offlineOnly}
             profile={activeProfile}
             apiKey={webMode ? sessionApiKey : ""}
             busy={busy}
@@ -289,7 +292,7 @@ function App() {
             }}
           />
         )}
-        {view === "models" && !activeProfile?.managed && (
+        {!offlineOnly && view === "models" && !activeProfile?.managed && (
           <ModelsWorkspace
             profiles={profiles}
             setProfiles={setProfiles}
@@ -855,8 +858,14 @@ function TaskWorkspace(props: TaskProps) {
 // Kept temporarily for opening historical 0.7 task records during migration.
 void TaskWorkspace;
 
+function isRunnableOfflineTool(tool: AgentTool) {
+  return tool.source === "builtin" && tool.available && (tool.status ?? "published") === "published"
+    && !tool.requiresNetwork && !tool.permissions?.includes("network");
+}
+
 function SkillsWorkspace({
   tools,
+  offlineOnly,
   profile,
   apiKey,
   busy,
@@ -870,6 +879,7 @@ function SkillsWorkspace({
   onOpenAgent,
 }: {
   tools: AgentTool[];
+  offlineOnly: boolean;
   profile?: AiProfile;
   apiKey: string;
   busy: BusyState;
@@ -885,7 +895,7 @@ function SkillsWorkspace({
   const [section] = useState<"library" | "builder">("library");
   const [libraryCategory, setLibraryCategory] = useState<
     "recent" | "custom" | "all" | "general" | "word" | "excel" | "pdf"
-  >("recent");
+  >(offlineOnly ? "all" : "recent");
   const [kind, setKind] = useState<SkillKind>("workflow");
   const [prompt, setPrompt] = useState(
     "设计一个干部任免审批表助手：从 Excel 名册读取人员信息，批量填入 Word 审批表，检查缺失字段并保留指定字体名称。",
@@ -915,7 +925,7 @@ function SkillsWorkspace({
   const builtins = tools.filter((tool) => tool.source === "builtin");
 
   useEffect(() => {
-    listDeletedSkills().then(setDeletedSkills).catch(() => setDeletedSkills([]));
+    if (!offlineOnly) listDeletedSkills().then(setDeletedSkills).catch(() => setDeletedSkills([]));
     listRecentSkills().then(setRecentSkillIds).catch(() => setRecentSkillIds([]));
   }, [tools.length]);
 
@@ -1063,6 +1073,9 @@ function SkillsWorkspace({
     try {
       const skill = await getSkill(tool.id);
       if (version !== selectionVersion.current) return;
+      if (offlineOnly && !isRunnableOfflineTool(skill)) {
+        throw new Error("这项工具当前无法在本机离线运行。");
+      }
       updateSkillInputs(skill, current => {
         const defaults = defaultSkillLibraryInputs(skill);
         if (skill.source === "builtin" || skill.status === "published") return defaults;
@@ -1264,16 +1277,16 @@ function SkillsWorkspace({
     <div className="page skills-page">
       <header className="page-header">
         <div>
-          <p>能力包</p>
-          <h1>选择能力包，直接处理材料</h1>
-          <span>这里用于查看、管理和运行能力包；新的能力包统一在文件 Agent 的“设计能力包”中创建。</span>
+          <p>{offlineOnly ? "离线工具" : "能力包"}</p>
+          <h1>{offlineOnly ? "选择工具，处理本机文件" : "选择能力包，直接处理材料"}</h1>
+          <span>{offlineOnly ? "选择工具后添加文件或文件夹。成果会另存，原件保留。" : "这里用于查看、管理和运行能力包；新的能力包统一在文件 Agent 的“设计能力包”中创建。"}</span>
         </div>
       </header>
       {error && <InlineMessage tone="error">{error}</InlineMessage>}
       {notice && <InlineMessage tone="success">{notice}</InlineMessage>}
       {section === "library" ? (
         <>
-          <div className="library-intro">
+          {!offlineOnly && <div className="library-intro">
             <div>
               <strong>{builtins.length}</strong>
               <span>基础工具</span>
@@ -1293,7 +1306,7 @@ function SkillsWorkspace({
             <p>
               临时脚本只保留在文件 Agent 会话中；保存、测试并发布后成为成熟能力包。普通能力包由本机执行，只有明确标注“需联网”的能力才访问网络。
             </p>
-          </div>
+          </div>}
           {deletedSkills.length > 0 && (
             <details className="skill-trash">
               <summary>回收站 <span>{deletedSkills.length}</span></summary>
@@ -1309,8 +1322,8 @@ function SkillsWorkspace({
             </details>
           )}
           <div className="library-heading">
-            <strong>能力包库</strong>
-            <span>常用显示最近成功运行的 3 个能力包；自建能力包可继续优化或删除。</span>
+            <strong>{offlineOnly ? "可用工具" : "能力包库"}</strong>
+            {!offlineOnly && <span>常用显示最近成功运行的 3 个能力包；自建能力包可继续优化或删除。</span>}
           </div>
           <label className="skill-search">
             <Wrench size={14} />
@@ -1337,7 +1350,7 @@ function SkillsWorkspace({
                 ["excel", "Excel"],
                 ["pdf", "PDF"],
               ] as const
-            ).map(([id, label]) => (
+            ).filter(([id]) => !offlineOnly || id !== "custom").map(([id, label]) => (
               <button
                 key={id}
                 className={libraryCategory === id ? "is-active" : ""}
@@ -1543,7 +1556,7 @@ function SkillsWorkspace({
                   </button>
                 </section>
               )}
-              <footer>
+              {!offlineOnly && <footer>
                 {selectedSkill.source === "designed" ? (
                   <>
                     {selectedSkill.status === "published" ? (
@@ -1583,7 +1596,7 @@ function SkillsWorkspace({
                     </button>
                   </>
                 )}
-              </footer>
+              </footer>}
             </section>
           )}
         </>
