@@ -1330,6 +1330,7 @@ impl AppState {
             "UPDATE ai_profiles SET default_model='deepseek-v4-pro' WHERE provider='deepseek' AND default_model='deepseek-reasoner'",
             [],
         );
+        #[cfg(not(feature = "windows-offline"))]
         seed_tianyi_profile(&connection).map_err(|e| format!("无法配置天翼云默认模型：{e}"))?;
         // A force-quit cannot deliver the normal cancellation event.  Do not
         // leave ghost "running" sessions or tool cards after the next launch.
@@ -4487,7 +4488,13 @@ fn designed_tools(state: &AppState) -> Result<Vec<AgentTool>, String> {
 }
 
 fn loaded_skill_catalog(state: &AppState) -> Result<Vec<AgentTool>, String> {
-    let catalog = builtin_tools().into_iter().chain(designed_tools(state)?).map(normalize_skill_status).collect::<Vec<_>>();
+    let mut tools = builtin_tools();
+    if cfg!(feature = "windows-offline") {
+        tools.retain(|tool| !tool.requires_network && !tool.permissions.iter().any(|p| p == "network"));
+    } else {
+        tools.extend(designed_tools(state)?);
+    }
+    let catalog = tools.into_iter().map(normalize_skill_status).collect::<Vec<_>>();
     Ok(catalog.iter().cloned().map(|mut tool| {
         skill_design::apply_network_dependency(&mut tool, &catalog);
         tool
@@ -12514,10 +12521,8 @@ fn run_skill_inner(
     state: &AppState,
     on_event: &impl EventSink<SkillRunEvent>,
 ) -> Result<SkillRunResult, String> {
-    let tool = builtin_tools()
+    let tool = loaded_skill_catalog(state)?
         .into_iter()
-        .chain(designed_tools(&state)?)
-        .map(normalize_skill_status)
         .find(|tool| tool.id == request.skill_id)
         .ok_or_else(|| "技能不存在".to_string())?;
     if !tool.available || tool.status.as_deref() != Some("published") || !tool_runtime_available(state, &tool, &mut HashSet::new()) {
@@ -13477,9 +13482,13 @@ pub fn run() {
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_shell::init());
-    builder
+    let builder = builder
         .setup(|app| {
             let args = std::env::args().collect::<Vec<_>>();
+            #[cfg(feature = "windows-offline")]
+            if args.iter().any(|arg| matches!(arg.as_str(), "--save-api-key-stdin" | "--ensure-api-key-stdin" | "--check-saved-api" | "--self-check-online" | "--self-check-design")) {
+                return Err("离线工具版仅支持本地文件处理和离线自检".into());
+            }
             if let Some(index) = args.iter().position(|a| matches!(a.as_str(), "--save-api-key-stdin" | "--ensure-api-key-stdin" | "--check-saved-api")) {
                 #[cfg(feature = "kylin-legacy")]
                 if let Some(window) = app.get_window("main") { let _ = window.hide(); }
@@ -13549,7 +13558,7 @@ pub fn run() {
                 return Ok(());
             }
             let state = AppState::new(&app.handle())?;
-            #[cfg(all(not(feature = "kylin-legacy"), any(target_os = "macos", target_os = "windows")))]
+            #[cfg(all(not(feature = "windows-offline"), not(feature = "kylin-legacy"), any(target_os = "macos", target_os = "windows")))]
             if let Err(error) = import_bundled_tianyi_access(&app.handle(), &state) {
                 eprintln!("天翼授权初始化失败：{error}");
             }
@@ -13560,8 +13569,19 @@ pub fn run() {
                 .execute("DELETE FROM jobs WHERE created_at < ?1", params![threshold]);
             app.manage(state);
             Ok(())
-        })
-        .invoke_handler(tauri::generate_handler![
+        });
+    #[cfg(feature = "windows-offline")]
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        list_agent_tools,
+        list_recent_skills,
+        get_skill,
+        run_skill,
+        cancel_skill_run,
+        reveal_in_finder,
+        list_office_fonts,
+    ]);
+    #[cfg(not(feature = "windows-offline"))]
+    let builder = builder.invoke_handler(tauri::generate_handler![
             scan_source,
             create_plan,
             start_job,
@@ -13620,8 +13640,8 @@ pub fn run() {
             generate_citizen_reply,
             reveal_in_finder,
             open_agent_artifact
-        ])
-        .run(tauri::generate_context!())
+        ]);
+    builder.run(tauri::generate_context!())
         .expect("材料助手启动失败");
 }
 
@@ -13734,6 +13754,20 @@ mod tests {
             stderr: b"unrelated shutdown warning".to_vec(),
         };
         assert_eq!(codex_output_detail(&output), "Missing reasoning_text");
+    }
+
+    #[test]
+    #[cfg(feature = "windows-offline")]
+    fn offline_install_has_only_builtin_local_tools_and_no_model_profile() {
+        let root = std::env::temp_dir().join(format!("zhai-offline-{}", Uuid::new_v4()));
+        let state = AppState::open(root.clone()).unwrap();
+        let profiles: i64 = state.db.lock().query_row("SELECT count(*) FROM ai_profiles", [], |row| row.get(0)).unwrap();
+        assert_eq!(profiles, 0);
+        let tools = loaded_skill_catalog(&state).unwrap();
+        assert!(tools.iter().any(|tool| tool.id == "docx_to_gongwen"));
+        assert!(tools.iter().all(|tool| tool.source == "builtin" && !tool.requires_network));
+        drop(state);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
