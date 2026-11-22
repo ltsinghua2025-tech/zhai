@@ -10,8 +10,9 @@ $project = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $python3 = (Resolve-Path $Python3Path).Path
 $target = 'x86_64-pc-windows-msvc'
 $release = Join-Path $project "src-tauri/target/$target/release"
-$scratch = Join-Path ([System.IO.Path]::GetTempPath()) ("zhai-build-" + [guid]::NewGuid().ToString('N'))
+$scratch = Join-Path ([IO.Path]::GetTempPath()) ("zhai-build-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $scratch | Out-Null
+$ruleNames = @()
 
 function Invoke-Checked {
     param([string] $Program, [string[]] $Arguments)
@@ -23,12 +24,12 @@ function Invoke-Checked {
 
 Push-Location $project
 try {
+    $env:VITE_WINDOWS_OFFLINE = '1'
     Invoke-Checked $python3 @('-c', 'import struct,sys; assert sys.version_info[:2] == (3,12) and struct.calcsize("P") == 8')
     Invoke-Checked $python3 @('-m', 'venv', (Join-Path $scratch 'python'))
     $python3Env = Join-Path $scratch 'python/Scripts/python.exe'
     Invoke-Checked $python3Env @('-m', 'pip', 'install', '-r', 'engine/requirements.txt', 'pyinstaller==6.16.0')
     Invoke-Checked $python3Env @('-m', 'unittest', 'discover', '-s', 'engine/tests', '-p', 'test_atomic_writer.py', '-v')
-
     $env:MATERIAL_WORKSHOP_ENGINE_NAME = "material-workshop-engine-$target"
     Push-Location (Join-Path $project 'engine')
     try {
@@ -37,146 +38,113 @@ try {
         Pop-Location
     }
 
-    Invoke-Checked 'npm.cmd' @('run', 'tauri', 'build', '--', '--target', $target, '--bundles', 'nsis')
+    Invoke-Checked 'npm.cmd' @('run', 'tauri', 'build', '--', '--target', $target, '--features', 'windows-offline', '--bundles', 'nsis')
     $installers = @(Get-ChildItem -Path (Join-Path $release 'bundle/nsis') -Filter '*-setup.exe' -File)
     if ($installers.Count -ne 1) {
         throw "Expected one Windows installer; found $($installers.Count)."
     }
-    Write-Output "Windows installer: $($installers[0].FullName)"
-    if (!$TestInstaller) {
-        $env:ZHAI_TEST_PYTHON3 = $python3Env
-        Invoke-Checked 'cargo' @('test', '--release', '--locked', '--lib', '--manifest-path', 'src-tauri/Cargo.toml', '--target', $target, 'process_runner::tests')
-        return
-    }
+    $installer = $installers[0].FullName
+    Write-Output "Windows installer: $installer"
 
-    # Check the contents actually installed by NSIS, rather than using the
-    # build tree's copy of the sidecar as an implicit fallback.
-    $install = Join-Path $scratch 'install'
-    $package = Start-Process -FilePath $installers[0].FullName -ArgumentList '/S', "/D=$install" -Wait -PassThru
-    if ($package.ExitCode -ne 0) {
-        throw "Windows installer exited with code $($package.ExitCode)."
-    }
-    $app = Join-Path $install 'material-workshop-desktop.exe'
-    $engine = Join-Path $install 'material-workshop-engine.exe'
-    if (!(Test-Path $app -PathType Leaf) -or !(Test-Path $engine -PathType Leaf)) {
-        throw 'The installed application or its packaged file engine is missing.'
-    }
-    $inspectImports = Join-Path $project 'scripts/diagnose-windows-imports.py'
-    Invoke-Checked $python3Env @($inspectImports, $app)
-    $originalTemp = $env:TEMP
-    $originalTmp = $env:TMP
-    try {
-        $env:TEMP = $scratch
-        $env:TMP = $scratch
-        $check = Start-Process -FilePath $app -ArgumentList '--self-check' -PassThru
-        if (!$check.WaitForExit(120000)) {
-            Stop-Process -Id $check.Id -Force
-            throw 'Installed Windows application self-check timed out.'
+    if ($TestInstaller) {
+        $payload = Join-Path $scratch 'embedded-runtime'
+        $sevenZip = (Get-Command 7z -ErrorAction Stop).Source
+        Invoke-Checked $sevenZip @('x', '-y', "-o$payload", $installer, '-ir!MicrosoftEdgeWebView2RuntimeInstaller.exe')
+        $runtime = @(Get-ChildItem $payload -Recurse -Filter 'MicrosoftEdgeWebView2RuntimeInstaller.exe' -File)
+        if ($runtime.Count -ne 1 -or $runtime[0].Length -lt 50MB) {
+            throw 'The NSIS contents do not contain a complete offline WebView2 installer.'
         }
-        $reports = @(Get-ChildItem -Path $scratch -Filter 'zhai-self-check-*' -Directory |
-            ForEach-Object { Get-Item -Path (Join-Path $_.FullName 'report.json') -ErrorAction SilentlyContinue })
-        if ($reports.Count -ne 1) {
-            throw "Installed application exited with code $($check.ExitCode) without a single self-check report."
+        $signature = Get-AuthenticodeSignature $runtime[0].FullName
+        if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') {
+            throw 'The embedded WebView2 runtime lacks a valid Microsoft signature.'
         }
-        $reportText = Get-Content -Path $reports[0].FullName -Raw -Encoding utf8
-        $reportText | Write-Output
-        $report = $reportText | ConvertFrom-Json
-        $failedSelfCheck = ($check.ExitCode -ne 0 -or -not $report.success)
-        if ($failedSelfCheck) {
-            $diagnostics = @'
-from pathlib import Path
-import sqlite3, sys
-root = Path(sys.argv[1]).parent
-path = root / "data" / "history.sqlite3"
-if path.is_file():
-    with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) as db:
-        for row in db.execute("SELECT tool_id,status,substr(detail,1,1000) FROM agent_tool_runs ORDER BY started_at"):
-            print("Synthetic tool execution:", ascii(row))
-        for row in db.execute("SELECT status,failed_files,report_path FROM jobs ORDER BY created_at"):
-            print("Synthetic file job:", ascii(row))
-'@
-            Invoke-Checked $python3 @('-c', $diagnostics, $reports[0].FullName)
+        Write-Output "Embedded Microsoft offline WebView2 installer verified: $($runtime[0].Length) bytes, SHA256 $((Get-FileHash $runtime[0].FullName).Hash)"
+        $webviewPath = Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'Microsoft/EdgeWebView/Application'
+        $installedWebviews = @(Get-ChildItem $webviewPath -Directory -ErrorAction SilentlyContinue |
+            Where-Object { Test-Path (Join-Path $_.FullName 'msedgewebview2.exe') } | Select-Object -ExpandProperty Name)
+        Write-Output "WebView2 versions present before installation: $($installedWebviews -join ', ')"
+        $install = Join-Path $scratch 'install'
+        $app = Join-Path $install 'material-workshop-desktop.exe'
+        $engine = Join-Path $install 'material-workshop-engine.exe'
+        if ($env:GITHUB_ACTIONS -eq 'true') {
+            foreach ($program in @($installer, $app, $engine, (Join-Path $env:TEMP 'MicrosoftEdgeWebView2RuntimeInstaller.exe'))) {
+                $name = 'zhai-offline-test-' + [guid]::NewGuid().ToString('N')
+                New-NetFirewallRule -DisplayName $name -Direction Outbound -Action Block -Program $program -Profile Any | Out-Null
+                $ruleNames += $name
+            }
+            Write-Output 'Outbound Windows firewall blocks installed for the setup, desktop, sidecar and runtime installer.'
         }
-    } finally {
-        $env:TEMP = $originalTemp
-        $env:TMP = $originalTmp
-    }
+        $process = Start-Process -FilePath $installer -ArgumentList '/S', "/D=$install" -Wait -PassThru
+        if ($process.ExitCode -ne 0 -or !(Test-Path $app -PathType Leaf) -or !(Test-Path $engine -PathType Leaf)) {
+            throw "Offline setup failed ($($process.ExitCode)) or installed files are missing."
+        }
+        $unexpected = @(Get-ChildItem $install -File -Recurse | Where-Object { $_.Name -match '(?i)codex.*\.exe$|judge.*\.key$|private-config\.json$' })
+        if ($unexpected) { throw 'Unexpected online runtime or provisioning material in offline installation.' }
+        Invoke-Checked $python3Env @((Join-Path $project 'scripts/diagnose-windows-imports.py'), $app)
 
-    # Test the same bootstrap used for domestic downloads with a synthetic
-    # resource. The public installer must leave a new installation unconfigured.
-    $installedResource = Join-Path $install 'judge-tianyi.key'
-    if (Test-Path $installedResource) {
-        throw 'The ordinary installer unexpectedly included a judge credential.'
-    }
-    $compiler = Get-Command makensis -ErrorAction SilentlyContinue
-    $makensis = if ($compiler) {
-        $compiler.Source
-    } else {
-        Get-ChildItem (Join-Path $env:LOCALAPPDATA 'tauri') -Filter makensis.exe -Recurse -File |
-            Select-Object -First 1 -ExpandProperty FullName
-    }
-    if (!$makensis) {
-        throw 'Cannot find the NSIS compiler used to build the installer.'
-    }
-    $synthetic = Join-Path $scratch 'synthetic.key'
-    [IO.File]::WriteAllText($synthetic, 'synthetic-installation-test')
-    $judgeSetup = Join-Path $scratch 'judge-setup.exe'
-    Invoke-Checked $makensis @('/V2', "/DINSTALLER_FILE=$($installers[0].FullName)", "/DJUDGE_RESOURCE=$synthetic", "/DOUTPUT_FILE=$judgeSetup", (Join-Path $project 'scripts/windows-judge.nsi'))
-    $judgeInstall = Start-Process -FilePath $judgeSetup -ArgumentList '/S', "/D=$install" -Wait -PassThru
-    if ($judgeInstall.ExitCode -ne 0 -or !(Test-Path $installedResource) -or
-        (Get-FileHash $installedResource).Hash -ne (Get-FileHash $synthetic).Hash) {
-        throw 'The judge installation failed to provision its synthetic resource.'
-    }
-    Write-Output 'Judge bootstrap installed the expected synthetic resource.'
-    if ($env:GITHUB_ACTIONS -eq 'true') {
-        # Only launch a synthetic judge build in a disposable CI user's profile.
-        $dataDir = Join-Path $env:APPDATA 'cn.materialworkbench.desktop'
-        $database = Join-Path $dataDir 'history.sqlite3'
-        $marker = Join-Path $dataDir 'judge-tianyi-initialized'
-        if ((Test-Path $database) -or (Test-Path $marker)) {
-            throw 'The native first-run check requires a fresh Windows user profile.'
-        }
-        $gui = Start-Process -FilePath $app -PassThru
+        $originalTemp = $env:TEMP
+        $originalTmp = $env:TMP
         try {
-            $deadline = [DateTime]::UtcNow.AddSeconds(60)
-            while (!(Test-Path $marker) -and !$gui.HasExited -and [DateTime]::UtcNow -lt $deadline) {
-                Start-Sleep -Milliseconds 300
+            $env:TEMP = $scratch
+            $env:TMP = $scratch
+            $check = Start-Process -FilePath $app -ArgumentList '--self-check' -PassThru
+            if (!$check.WaitForExit(180000)) {
+                Stop-Process -Id $check.Id -Force
+                throw 'Installed offline application self-check timed out.'
             }
-            if (!(Test-Path $marker) -or !(Test-Path $database)) {
-                throw 'Normal application startup did not finish provisioning.'
+            $reports = @(Get-ChildItem $scratch -Filter 'zhai-self-check-*' -Directory | ForEach-Object {
+                Get-Item (Join-Path $_.FullName 'report.json') -ErrorAction SilentlyContinue
+            })
+            if ($reports.Count -ne 1) { throw "No unique self-check report after exit $($check.ExitCode)." }
+            $reportText = Get-Content $reports[0].FullName -Raw -Encoding utf8
+            Write-Output $reportText
+            $report = $reportText | ConvertFrom-Json
+            if ($check.ExitCode -ne 0 -or !$report.success -or $report.edition -ne 'windows-offline') {
+                throw 'Installed offline Word, Excel or PDF validation failed.'
             }
-            $query = @'
-import sqlite3, sys
-with sqlite3.connect(sys.argv[1]) as db:
-    row = db.execute("SELECT base_url, key_stored FROM ai_profiles WHERE id=?", ("zhai-tianyi",)).fetchone()
-assert row == ("https://ai.ctaigw.cn/v1", 1), "Model profile was not provisioned"
-'@
-            Invoke-Checked $python3 @('-c', $query, $database)
-            Write-Output 'Fresh Windows GUI startup saved the synthetic judge profile in Credential Manager.'
         } finally {
-            if (!$gui.HasExited) {
-                Stop-Process -Id $gui.Id -Force
+            $env:TEMP = $originalTemp
+            $env:TMP = $originalTmp
+        }
+
+        if ($env:GITHUB_ACTIONS -eq 'true') {
+            $dataDir = Join-Path $env:APPDATA 'cn.materialworkbench.desktop'
+            $database = Join-Path $dataDir 'history.sqlite3'
+            if (Test-Path $database) { throw 'A fresh CI user profile is required for the GUI test.' }
+            $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+            $listener.Start()
+            $port = $listener.LocalEndpoint.Port
+            $listener.Stop()
+            $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=$port --remote-debugging-address=127.0.0.1 --disable-background-networking"
+            $gui = Start-Process -FilePath $app -PassThru
+            try {
+                Invoke-Checked 'node' @((Join-Path $project 'scripts/check-windows-offline-gui.mjs'), "$port")
+                $query = 'import sqlite3,sys; db=sqlite3.connect(sys.argv[1]); assert not db.execute("SELECT count(*) FROM ai_profiles WHERE id=? OR key_stored=1",("zhai-tianyi",)).fetchone()[0]'
+                if (!(Test-Path $database) -or (Test-Path (Join-Path $dataDir 'judge-tianyi-initialized'))) {
+                    throw 'Fresh offline profile was not initialized correctly.'
+                }
+                Invoke-Checked $python3 @('-c', $query, $database)
+                Write-Output 'Fresh installed offline GUI opened its local tool library without model credentials.'
+            } finally {
+                Remove-Item Env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS -ErrorAction SilentlyContinue
+                if (!$gui.HasExited) { Stop-Process -Id $gui.Id -Force }
             }
         }
     }
 
     $env:ZHAI_TEST_PYTHON3 = $python3Env
-    $testArgs = @('test', '--release', '--locked', '--lib', '--manifest-path', 'src-tauri/Cargo.toml', '--target', $target)
-    $messages = & cargo @testArgs --no-run --message-format=json
-    if ($LASTEXITCODE -ne 0) {
-        throw "Native Rust test build failed ($LASTEXITCODE)."
-    }
-    $testExecutables = @($messages | ForEach-Object { $_ | ConvertFrom-Json } |
+    $argsForTests = @('test', '--release', '--locked', '--lib', '--features', 'windows-offline', '--manifest-path', 'src-tauri/Cargo.toml', '--target', $target)
+    $messages = & cargo @argsForTests --no-run --message-format=json
+    if ($LASTEXITCODE -ne 0) { throw 'Native Rust test build failed.' }
+    $binaries = @($messages | ForEach-Object { $_ | ConvertFrom-Json } |
         Where-Object { $_.reason -eq 'compiler-artifact' -and $_.profile.test -and $_.executable } |
         ForEach-Object { $_.executable })
-    if ($testExecutables.Count -ne 1) {
-        throw "Expected one Rust library test executable; found $($testExecutables.Count)."
-    }
-    Invoke-Checked $python3Env @($inspectImports, $testExecutables[0])
-    Invoke-Checked $testExecutables[0] @('process_runner::tests', '--nocapture')
-    if ($failedSelfCheck) {
-        throw 'Installed Windows application self-check failed. See its report above.'
-    }
+    if ($binaries.Count -ne 1) { throw 'Expected one native Rust library test executable.' }
+    Invoke-Checked $python3Env @((Join-Path $project 'scripts/diagnose-windows-imports.py'), $binaries[0])
+    Invoke-Checked $binaries[0] @('process_runner::tests', '--nocapture')
 } finally {
+    foreach ($name in $ruleNames) {
+        Remove-NetFirewallRule -DisplayName $name -ErrorAction SilentlyContinue
+    }
     Pop-Location
 }

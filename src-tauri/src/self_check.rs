@@ -711,53 +711,76 @@ fn verify_matrix_output(state:&AppState,root:&Path,outputs:&[PathBuf],expected:&
 }
 
 #[cfg(windows)]
-fn check_windows(app: &AppHandle, state: &AppState, root: &Path, first: &Path, second: &Path) -> Result<Value, String> {
-    if python_sandbox::status().available || detect_codex_runtime_internal().available {
-        return Err("Windows 预览版错误地启用了未适配的运行器".into());
+fn windows_manual_output(app: &AppHandle, state: &AppState, skill: &str, inputs: &[PathBuf]) -> Result<PathBuf, String> {
+    let hashes = inputs.iter().map(|p| sha256_file(p)).collect::<Result<Vec<_>, _>>()?;
+    let result = run_skill_inner(RunSkillRequest {
+        run_id: Uuid::new_v4().to_string(), skill_id: skill.into(),
+        paths: inputs.iter().map(|p| p.to_string_lossy().into_owned()).collect(),
+        parameters: json!({}),
+    }, app.clone(), state, &Events).map_err(|e| format!("{skill}：{e}"))?;
+    if hashes != inputs.iter().map(|p| sha256_file(p)).collect::<Result<Vec<_>, _>>()? {
+        return Err(format!("{skill} 修改了原件"));
     }
-    let before = [sha256_file(first)?, sha256_file(second)?];
+    let outputs = artifact_paths(&result.artifacts);
+    if outputs.len() != 1 { return Err(format!("{skill} 实际生成 {} 份成果", outputs.len())); }
+    Ok(outputs[0].clone())
+}
+
+#[cfg(windows)]
+fn check_windows(app: &AppHandle, state: &AppState, root: &Path, first: &Path, _second: &Path) -> Result<Value, String> {
+    if !cfg!(feature = "windows-offline") || python_sandbox::status().available || detect_codex_runtime_internal().available {
+        return Err("安装程序未进入 Windows 离线工具模式".into());
+    }
+    let creds: i64 = state.db.lock().query_row(
+        "SELECT count(*) FROM ai_profiles WHERE id='zhai-tianyi' OR key_stored=1", [], |r| r.get(0)
+    ).map_err(|e| e.to_string())?;
+    if creds != 0 { return Err("全新离线安装发现模型授权".into()); }
+    let sheets = root.join("xlsx-fixtures");
+    run_fixture_script(&root.join("make-xlsx"), r#"from openpyxl import Workbook
+def run(context, params):
+    outputs = []
+    for name, rows in [('a', [['单位', '人数'], ['甲单位', 12]]), ('b', [['人数', '单位'], [8, '乙单位']])]:
+        book = Workbook()
+        for row in rows:
+            book.active.append(row)
+        path = context.output_dir / (name + '.xlsx')
+        book.save(path)
+        outputs.append(str(path))
+    return {'summary':'合成表格', 'outputs':outputs}
+"#, &root.join("empty"), &sheets)?;
     let mut failures = Vec::new();
-    for mode in ["success", "failure", "cancel"] {
-        if let Err(error) = legacy_staging_check(app, state, first, &root.join(format!("compatible-{mode}")), mode) {
-            failures.push(format!("兼容回合 {mode}：{error}"));
+    let verify = root.join("office-results");
+    fs::create_dir_all(&verify).map_err(|e| e.to_string())?;
+    let word = windows_manual_output(app, state, "docx_to_gongwen", &[first.to_path_buf()]);
+    let excel = windows_manual_output(app, state, "merge_xlsx", &[sheets.join("a.xlsx"), sheets.join("b.xlsx")]);
+    for (name, result) in [("word.docx", word), ("excel.xlsx", excel)] {
+        match result {
+            Ok(path) => { fs::copy(path, verify.join(name)).map_err(|e| e.to_string())?; },
+            Err(error) => failures.push(error),
         }
     }
-    if let Err(error) = check_pdf_merge_delivery(app, state, root) {
-        failures.push(format!("PDF 合并：{error}"));
-    }
-    if before != [sha256_file(first)?, sha256_file(second)?] {
-        return Err("自检原件发生变化".into());
-    }
-
-    // A synthetic, isolated credential verifies platform storage. No user
-    // profiles, network APIs, or existing credentials are used.
-    let entry = keyring::Entry::new("zhai.release-self-check", &Uuid::new_v4().to_string())
-        .map_err(|error| error.to_string())?;
-    let value = "isolated-not-a-real-key";
-    entry.set_password(value).map_err(|error| error.to_string())?;
-    let read = entry.get_password();
-    entry.delete_credential().map_err(|error| error.to_string())?;
-    if !matches!(read.as_deref(), Ok(actual) if actual == value)
-        || !matches!(entry.get_password(), Err(keyring::Error::NoEntry))
-    {
-        return Err("Windows 凭据读回或移除失败".into());
-    }
-
-    if !failures.is_empty() {
-        return Err(failures.join("\n"));
-    }
-    Ok(json!({
-        "success": true,
-        "version": env!("CARGO_PKG_VERSION"),
-        "platform": "windows",
-        "checks": [
-            "未启用 Codex 本地桥接或临时 Python 执行",
-            "兼容接口本地协议驱动真实公文排版、Word 结构编辑和唯一成果交付",
-            "模型失败和取消时不交付暂存成果",
-            "三页 PDF 合并结果、顺序与原件哈希核验",
-            "Windows 凭据写入、读回及删除"
-        ]
-    }))
+    if let Err(error) = check_pdf_merge_delivery(app, state, root) { failures.push(error); }
+    if !failures.is_empty() { return Err(failures.join("\n")); }
+    run_fixture_script(&root.join("verify-office"), r#"from docx import Document
+from openpyxl import load_workbook
+def run(context, params):
+    by_name = {path.name:path for path in context.inputs}
+    doc = Document(by_name['word.docx'])
+    assert doc.paragraphs[0].text == '测试通知'
+    assert doc.paragraphs[0].alignment == 1, '标题未居中'
+    assert any(r.bold for p in doc.paragraphs if '报送材料' in p.text for r in p.runs), '加粗正文未保留'
+    book = load_workbook(by_name['excel.xlsx'], data_only=True)
+    rows = list(book.active.values)
+    book.close()
+    columns = list(rows[0])
+    assert {r[columns.index('单位')]:r[columns.index('人数')] for r in rows[1:]} == {'甲单位':12,'乙单位':8}, rows
+    assert any('来源' in str(h) for h in columns), columns
+    return {'summary':'重新打开 Word 和 Excel 验收通过','outputs':[]}
+"#, &verify, &root.join("verify-office/output"))?;
+    Ok(json!({"success":true,"version":env!("CARGO_PKG_VERSION"),"platform":"windows","edition":"windows-offline",
+        "checks":["全新用户无天翼授权或已保存模型凭据","能力库正式入口完成 Word 公文排版，重新打开核对标题居中和正文加粗",
+                  "能力库正式入口合并两份 Excel，核对列对齐、数值及来源","能力库正式入口合并 PDF，复核三页顺序",
+                  "各项输入原件 SHA-256 保持一致"]}))
 }
 
 pub(super) fn run(app: &AppHandle, root: &Path) -> Result<Value, String> {
@@ -1224,8 +1247,13 @@ def run(context, params):
 "#, &root.join("empty"), &fixtures)?;
     let inputs = vec![fixtures.join("b.pdf"), fixtures.join("a.pdf")];
     let before = inputs.iter().map(|p| sha256_file(p)).collect::<Result<Vec<_>,_>>()?;
-    let tool = builtin_tools().into_iter().find(|t| t.id == "merge_pdf").ok_or("missing merge_pdf")?;
-    let (_, outputs) = execute_skill_pipeline(app, state, &tool, &inputs, &json!({}), Arc::new(AtomicBool::new(false)), &root.join("pdf-merge"), 1, &mut HashSet::new())?;
+    #[cfg(windows)]
+    let outputs = vec![windows_manual_output(app, state, "merge_pdf", &inputs)?];
+    #[cfg(not(windows))]
+    let outputs = {
+        let tool = builtin_tools().into_iter().find(|t| t.id == "merge_pdf").ok_or("missing merge_pdf")?;
+        execute_skill_pipeline(app, state, &tool, &inputs, &json!({}), Arc::new(AtomicBool::new(false)), &root.join("pdf-merge"), 1, &mut HashSet::new())?.1
+    };
     if outputs.len()!=1 { return Err(format!("PDF合并交付数量错误：{}", outputs.len())); }
     let verify_inputs = root.join("verify-pdf-merge/inputs");
     fs::create_dir_all(&verify_inputs).map_err(|e| e.to_string())?;
