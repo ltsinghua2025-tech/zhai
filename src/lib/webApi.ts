@@ -17,7 +17,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const signal = init?.signal;
   if (signal?.aborted) cancel();
   signal?.addEventListener("abort", cancel, { once: true });
-  const timer = window.setTimeout(cancel, init?.method === "POST" ? 240_000 : 30_000);
+  const timer = window.setTimeout(cancel, init?.method === "POST" ? 330_000 : 30_000);
   try {
     const response = await fetch(`${API_BASE}${path}`, {
       ...init, signal: controller.signal,

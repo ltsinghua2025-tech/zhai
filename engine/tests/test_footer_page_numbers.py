@@ -117,3 +117,62 @@ def test_ambiguous_fields_need_a_layout_choice(tmp_path, layout, question):
     with pytest.raises(ValueError, match=question):
         apply(source, out)
     assert not out.exists() and hashlib.sha256(source.read_bytes()).digest() == before
+
+
+def test_replace_existing_fields_preserves_literals_other_fields_and_original(tmp_path):
+    from material_workshop_engine import footer_number_fields
+
+    document = Document()
+    document.add_paragraph("第一页保留")
+    document.add_page_break()
+    document.add_paragraph("第二页保留")
+    document.core_properties.author = "资料室"
+    section = document.sections[0]
+    section.header.paragraphs[0].add_run("内部例会")
+    footer = section.footer
+    left = footer.paragraphs[0]
+    left.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    page(left, prefix="落款甲", suffix="留存乙")
+    total = OxmlElement("w:fldSimple")
+    total.set(qn("w:instr"), " NUMPAGES ")
+    left._p.append(total)
+    right = footer.add_paragraph()
+    right.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    legacy = OxmlElement("w:fldSimple")
+    legacy.set(qn("w:instr"), " PAGE ")
+    right._p.append(legacy)
+    source, output, failed = [tmp_path / name for name in ("原件.docx", "替换.docx", "未替换.docx")]
+    document.save(source)
+    original = hashlib.sha256(source.read_bytes()).digest()
+    with pytest.raises(ValueError, match="多个当前页码"):
+        apply(source, failed)
+    options = {"center_docx_page_numbers": {"replaceExisting": True}}
+    process_docx(source, output, set(options), options, [])
+    result = Document(output)
+    assert [p.text for p in result.paragraphs] == [p.text for p in document.paragraphs]
+    assert result.core_properties.author == "资料室" and result.sections[0].header.paragraphs[0].text == "内部例会"
+    footer = result.sections[0].footer
+    text, number = footer.paragraphs
+    assert text.text == "落款甲留存乙" and text.alignment == WD_ALIGN_PARAGRAPH.LEFT
+    assert number.alignment == WD_ALIGN_PARAGRAPH.CENTER
+    assert [kind for kind, *_ in footer_number_fields(text._p)] == ["NUMPAGES"]
+    assert [kind for kind, *_ in footer_number_fields(number._p)] == ["PAGE"]
+    assert len(number._p.xpath("./w:fldSimple")) == 1
+    with ZipFile(source) as before, ZipFile(output) as after:
+        for path in before.namelist():
+            if not path.startswith("word/footer"):
+                assert before.read(path) == after.read(path), path
+    assert not failed.exists() and hashlib.sha256(source.read_bytes()).digest() == original
+
+
+def test_replace_existing_rejects_unsafe_field_object(tmp_path):
+    doc = Document()
+    p = doc.sections[0].footer.paragraphs[0]
+    page(p)
+    p._p.xpath("./w:r[w:t]")[0].append(OxmlElement("w:drawing"))
+    source, output = tmp_path / "原件.docx", tmp_path / "成果.docx"
+    doc.save(source)
+    options = {"center_docx_page_numbers": {"replaceExisting": True}}
+    with pytest.raises(ValueError, match="其他对象"):
+        process_docx(source, output, set(options), options, [])
+    assert not output.exists()

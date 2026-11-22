@@ -1561,7 +1561,7 @@ export default function AgentWorkspace({ active = true, profile, apiKey, openMod
             </label>
           </div>}
           <small className="send-consent">
-            {webMode ? (workspaceMode === "skill" ? "设计时会把样本交给模型，生成可测试的简单工作流草稿。" : allowModelFileAccess ? "会话保存在服务器；本轮允许所选模型读取附件正文。" : "会话和文件保存在服务器；任务说明、文件名与处理摘要会发送模型，附件正文不发送。") : workspaceMode === "skill"
+            {webMode ? (workspaceMode === "skill" ? "可以先描述需求。添加样本后，设计时会将所选样本内容发给模型，测试使用原件副本。" : allowModelFileAccess ? "会话保存在服务器；本轮允许所选模型读取附件正文。" : "会话和文件保存在服务器；任务说明、文件名与处理摘要会发送模型，附件正文不发送。") : workspaceMode === "skill"
               ? "设计模式会将你添加的样本和参考材料交给所选模型，生成的能力包先保存为本地草稿。"
               : allowModelFileAccess
               ? "发送即允许所选模型读取本会话附件；原件只读，成果生成新版本。"
@@ -1641,7 +1641,7 @@ export default function AgentWorkspace({ active = true, profile, apiKey, openMod
               {allRuns.filter((item) => item.status === "completed").length}{" "}
               次能力调用
             </strong>
-            <small>{webMode ? "试用版运行已有文件处理能力；自定义脚本暂未开放。" : "成熟能力包优先；临时代码只在系统隔离器内运行。"}</small>
+            <small>{webMode ? pythonStatus?.detail || "正在检查文件工具环境。" : "成熟能力包优先；临时代码只在系统隔离器内运行。"}</small>
           </span>
         </div>
       </aside>

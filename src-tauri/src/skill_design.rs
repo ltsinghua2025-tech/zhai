@@ -301,6 +301,54 @@ fn is_input_or_environment_error(error: &str) -> bool {
     ["需要补充参数", "请至少填写", "请填写", "参数缺失", "未安装", "不可用", "缺少组件", "尚不支持", "格式不在", "缺少系统", "无法启动", "隔离器"].iter().any(|text| error.contains(text))
 }
 
+pub(super) struct DesignSamples<'a> {
+    pub app: &'a AppHandle,
+    pub paths: &'a [String],
+    pub parameters: &'a Value,
+}
+
+impl DesignSamples<'_> {
+    /// A trial uses a disposable package and execution directory. It never
+    /// changes the saved draft, test status, or published files.
+    pub fn trial(&self, state: &AppState, workspace: &Path, expected_id: &str, cancel: Arc<AtomicBool>) -> Result<Value, String> {
+        if cancel.load(Ordering::SeqCst) { return Err("样本测试已停止".into()); }
+        let root = state.data_dir.join("skill-tests").join(Uuid::new_v4().to_string());
+        fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+        let _cleanup = ExecutionWorkspaceGuard(root.clone());
+        let candidate = root.join("package");
+        copy_directory(workspace, &candidate)?;
+        let mut tool = load_designed_package(&candidate)?;
+        if tool.id != expected_id { return Err("请保留原能力包 ID".into()); }
+        propagate_network_dependency(&mut tool, state)?;
+        if tool.requires_network || tool.kind.as_deref() == Some("adapter") {
+            return Ok(json!({"status":"needs_input","detail":"此能力需要外部服务或目标软件的实际验收。"}));
+        }
+        let (parameters, inputs) = match validate_parameter_values(&tool, self.parameters)
+            .and_then(|p| Ok((p, sample_inputs(&tool, self.paths)?))) {
+            Ok(prepared) => prepared,
+            Err(detail) => return Ok(json!({"status":"needs_input","detail":detail})),
+        };
+        workflow::refresh_locks(&tool, state)?;
+        let hashes = inputs.iter().map(|path| sha256_file(path)).collect::<Result<Vec<_>, _>>()?;
+        let run = execute_skill_pipeline(self.app, state, &tool, &inputs, &parameters, cancel.clone(),
+                                         &root.join("run"), 1, &mut HashSet::new());
+        for (path, digest) in inputs.iter().zip(hashes) {
+            if sha256_file(path)? != digest { return Err("原始样本校验未通过".into()); }
+        }
+        let (_, outputs) = match run {
+            Err(detail) if is_input_or_environment_error(&detail) => return Ok(json!({"status":"needs_input","detail":detail})),
+            other => other?,
+        };
+        if outputs.is_empty() { return Err("样本执行没有生成成果".into()); }
+        let mut checks = Vec::new();
+        for path in outputs {
+            if cancel.load(Ordering::SeqCst) { return Err("样本测试已停止".into()); }
+            checks.push(validate_generated_artifact(&path)?);
+        }
+        Ok(json!({"status":"passed","checks":checks}))
+    }
+}
+
 pub(super) fn execute_sample_test(
     state: &AppState, app: &AppHandle, mut tool: AgentTool, paths: &[String], supplied: &Value,
     cancellation: Arc<AtomicBool>, events: &impl EventSink<SkillDesignEvent>,
@@ -394,7 +442,7 @@ async fn test_with_repair(
     let failure = result.test_result.as_ref().filter(|test| test.repairable && test.status == "failed").map(|test| test.summary.clone());
     if let (Some(mut request), Some(failure)) = (repair, failure) {
         if cancellation.load(Ordering::SeqCst) { return Ok(result); }
-        phase(events, "repairing", "样本运行失败，正在根据实际错误修复一次，随后重新测试");
+        phase(events, "repairing", "正在把样本执行错误交给设计 Agent，修订后重新验证");
         request.current_skill_id = Some(tool.id.clone());
         request.prompt = format!("修复当前能力包，保留原有功能、输入格式和用户参数，不得删除验收条件或伪造成功。实际样本测试失败：\n{failure}\n本轮用户参数：{}\n原始要求：{}\n只修正实现；如果缺少用户业务信息，通过明确参数校验返回，不要猜测。", parameters, request.prompt);
         // Repair the saved version, not an older design checkpoint.
@@ -406,7 +454,8 @@ async fn test_with_repair(
                 copy_directory(Path::new(package), &workspace)?;
             }
         }
-        let repaired = design_agent_tool_cancellable(request, state, &ProgressOnly(events), cancellation.clone(), Duration::from_secs(300)).await;
+        let repaired = design_agent_tool_cancellable(request, state, &ProgressOnly(events), cancellation.clone(), Duration::from_secs(300),
+            Some(DesignSamples { app, paths, parameters })).await;
         match repaired {
             Ok(mut candidate) => {
                 if candidate.id != tool.id { return Err("修复结果改变了能力包标识，已拒绝覆盖".into()); }
@@ -415,7 +464,7 @@ async fn test_with_repair(
                 candidate.test_status = Some("untested".into());
                 tool = save_designed_tool_internal(candidate, state)?;
                 result = execute_sample_test(state, app, tool, paths, parameters, cancellation, events)?;
-                if let Some(test) = result.test_result.as_mut() { test.summary = format!("已自动修复一次并重测。{}", test.summary); }
+                if let Some(test) = result.test_result.as_mut() { test.summary = format!("现有能力已修订并重测。{}", test.summary); }
             }
             Err(error) => {
                 if let Some(test) = result.test_result.as_mut() {
@@ -459,7 +508,8 @@ pub(super) async fn design_and_test_skill_inner(request: DesignAndTestRequest, a
     let (flag, _guard) = begin_run(state, &request.run_id, request.design.design_id.as_deref(), request.design.current_skill_id.as_deref())?;
     let _ = events.send(SkillDesignEvent::Started { design_id: request.run_id.clone() });
     let repair = request.design.clone();
-    let tool = design_agent_tool_cancellable(request.design, state, &ProgressOnly(events), flag.clone(), Duration::from_secs(600)).await?;
+    let samples = request.auto_test.then_some(DesignSamples { app, paths: &request.sample_paths, parameters: &request.parameters });
+    let tool = design_agent_tool_cancellable(request.design, state, &ProgressOnly(events), flag.clone(), Duration::from_secs(600), samples).await?;
     if flag.load(Ordering::SeqCst) { return Err("能力包设计已停止，工作区已保留".into()); }
     let saved = save_designed_tool_internal(tool, state)?;
     checkpoint_result(state, repair.design_id.as_deref(), &SkillDesignRunResult { skill: saved.clone(), test_result: None })?;

@@ -90,7 +90,7 @@ pub(super) fn design(app: &AppHandle, root: &Path) -> Result<Value, String> {
             sample_paths, parameters: parameters.clone(), repair,
         }, app, &state, &Events))?.test_result.ok_or_else(|| "没有正式测试结果".to_string());
         let repaired = retest("matrix-repair", paths, Some(spec))?;
-        if repaired.status != "passed" || !repaired.summary.contains("已自动修复一次并重测") { return Err(repaired.summary); }
+        if repaired.status != "passed" || repaired.outputs.is_empty() { return Err(repaired.summary); }
         let reused = retest("matrix-reuse", vec![next.display().to_string()], None)?;
         if reused.status != "passed" { return Err(reused.summary); }
         return Ok(json!({"root":root,"model":model,"initial":initial,"repaired":repaired,"reuse":reused}));
@@ -199,7 +199,7 @@ fn design_resume_check(state: &AppState, profile_id: &str, model: &str, root: &P
     let interrupted = run_codex_design_turn(state, &profile, &api_key, model, &workspace,
         "resume-write-check", None,
         "This is an isolated write/recovery integration check. Immediately use a shell command to write exactly checkpoint-ready to checkpoint.txt in the current directory, then run a 60-second sleep in the same command. Do not inspect other files. The host intentionally cancels after the checkpoint exists.",
-        Duration::from_secs(100), cancellation);
+        Duration::from_secs(100), cancellation, None);
     monitor.join().map_err(|_| "checkpoint monitor failed")?;
     if !interrupted.as_ref().is_err_and(|e| e.contains("取消")) || !marker.is_file() {
         return Err(format!("未真实中断已写入的设计任务：{interrupted:?}"));
@@ -210,14 +210,14 @@ fn design_resume_check(state: &AppState, profile_id: &str, model: &str, root: &P
     eprintln!("真实设计已写入并中断，开始续接写入检查");
     run_codex_design_turn(state, &profile, &api_key, model, &workspace, "resume-write-check", Some(&thread_id),
         "Continue the interrupted integration check. Read checkpoint.txt and verify its exact content is checkpoint-ready. Write exactly resumed-write-ok to resumed.txt in this directory. Execute the write; do not just explain. Stop immediately after verifying the saved file.",
-        Duration::from_secs(90), Arc::new(AtomicBool::new(false)))?;
+        Duration::from_secs(90), Arc::new(AtomicBool::new(false)), None)?;
     if fs::read_to_string(workspace.join("resumed.txt")).unwrap_or_default().trim() != "resumed-write-ok" {
         return Err("续接设计未能真实写入新文件".into());
     }
     fs::write(workspace.join("repair.py"), "def run(:\n").map_err(|e|e.to_string())?;
     run_codex_design_turn(state, &profile, &api_key, model, &workspace, "resume-write-check", Some(&thread_id),
         "Repair the actual broken repair.py once. Replace it with valid Python that writes exactly repair-write-ok to repair-result.txt in the current directory when executed. Execute python3 repair.py and verify the saved output. Edit the actual file, do not just return code. Do not modify checkpoint.txt or resumed.txt.",
-        Duration::from_secs(90), Arc::new(AtomicBool::new(false)))?;
+        Duration::from_secs(90), Arc::new(AtomicBool::new(false)), None)?;
     if fs::read_to_string(workspace.join("repair-result.txt")).unwrap_or_default().trim() != "repair-write-ok" {
         return Err("定向修复续接未能修改并执行实际脚本".into());
     }
@@ -797,6 +797,7 @@ fs::write(&script, "from docx import Document\ndef run(context, params):\n    ou
         .join("scratch");
     let delivery = root.join("delivery");
     fs::create_dir_all(&scratch).map_err(|e| e.to_string())?;
+    let contract = derive_task_contract("生成一份 Word 文档", attachments.len());
     let bridge = agent_tools::ToolSession::new(
         app,
         &state,
@@ -807,6 +808,7 @@ fs::write(&script, "from docx import Document\ndef run(context, params):\n    ou
         &scratch,
         &delivery,
         &attachments,
+        &contract,
     );
     let mut checks = Vec::new();
     mcp_bridge::with_server(
@@ -848,7 +850,7 @@ fs::write(&script, "from docx import Document\ndef run(context, params):\n    ou
     checks.push("真实 MCP 能力契约区分 PDF 输入与 TXT 最终成果");
     let word_scratch = PathBuf::from(&session.workspace_path).join("runs/word-structure-check/scratch");
     let word_delivery = root.join("word-delivery");
-    let word_bridge = agent_tools::ToolSession::new(app, &state, &session, "word-structure-check", &Events, Arc::new(AtomicBool::new(false)), &word_scratch, &word_delivery, &attachments);
+    let word_bridge = agent_tools::ToolSession::new(app, &state, &session, "word-structure-check", &Events, Arc::new(AtomicBool::new(false)), &word_scratch, &word_delivery, &attachments, &contract);
     mcp_bridge::with_server(agent_tools::definitions(), |name, args| word_bridge.dispatch(name, args), |endpoint| {
         let mut child = Command::new(std::env::current_exe().map_err(|e| e.to_string())?)
             .args(["--mcp-stdio", endpoint.path.to_str().ok_or("端点路径无效")?])
@@ -865,6 +867,17 @@ fs::write(&script, "from docx import Document\ndef run(context, params):\n    ou
             Ok(reply["result"]["structuredContent"].clone())
         };
         let structure = rpc(1, "read_word_structure", json!({"id":attachments[0].id}))?;
+        let failing_test = json!({"diagnostic":true,"script":"def run(context):\n    raise ValueError('样本结构不符合本次试验')"});
+        if rpc(10, "run_python", failing_test.clone()).is_ok() { return Err("失败试验未返回实际错误".into()); }
+        let progress = word_bridge.recovery_progress();
+        if rpc(11, "run_python", failing_test).is_ok() || progress != word_bridge.recovery_progress() {
+            return Err("重复失败试验被当作新进展".into());
+        }
+        rpc(12, "run_python", json!({"script":"def run(context):\n    path=context.output_dir / '试验.txt'\n    path.write_text('格式试验')\n    return {'summary':'试验','outputs':[str(path)]}"}))?;
+        let rejected = rpc(13, "deliver", json!({"input":"previous"})).err().ok_or("错误格式被交付")?;
+        if !rejected.contains("docx") || word_bridge.has_delivery() {
+            return Err("错误格式未在本轮 MCP 内退回，或发布了试验成果".into());
+        }
         let original = structure["blocks"][0]["text"].as_str().ok_or("结构缺少正文段落")?;
         let edited = rpc(2, "edit_word", json!({"id":attachments[0].id,"sourceHash":structure["sourceHash"],"outputName":"Word定位编辑验收.docx","edits":[{"locator":structure["blocks"][0]["locator"],"expected":original,"text":"Word定位编辑验收标题"}]}))?;
         if edited["outputs"].as_array().is_none_or(|v| v.len() != 1) { return Err("Word 定位编辑没有单一暂存DOCX".into()); }
@@ -884,6 +897,7 @@ fs::write(&script, "from docx import Document\ndef run(context, params):\n    ou
     if verified["blocks"][0]["text"] != "Word定位编辑验收标题" { return Err("Word定位编辑成果重开内容不正确".into()); }
     if workflow::promote(&state, &session.id, "word-structure-check", Some("不应直接重放")).is_ok() { return Err("固定定位/hash编辑不应直接沉淀能力".into()); }
     checks.push("真实 MCP Word 结构读取、定位编辑与最终交付");
+    checks.push("失败诊断和格式不符在同一 MCP 会话退回，随后换用定位编辑生成合格 DOCX");
     checks.push("Word 成果重开、原件哈希及定位流程沉淀拒绝");
     checks.push("真实 MCP 诊断标记阻止显式检查JSON输出成为成果");
     for mode in ["success", "failure", "cancel"] {

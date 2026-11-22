@@ -616,11 +616,13 @@ export async function listAiProfiles(): Promise<AiProfile[]> {
 
 export async function getPythonExecutionStatus(): Promise<PythonExecutionStatus> {
   if (isTauri()) return invoke("get_python_execution_status");
+  if (isWebApiEnabled()) {
+    const { fileAgent } = await webRequest<{ fileAgent?: PythonExecutionStatus }>("/capabilities");
+    return fileAgent ?? { available: false, detail: "当前服务可使用内置文件工具。" };
+  }
   return {
     available: false,
-    detail: isWebApiEnabled()
-      ? "当前网页端支持现有文件工具，尚未提供隔离临时脚本执行。"
-      : "浏览器预览不执行临时脚本。",
+    detail: "浏览器预览不执行临时脚本。",
   };
 }
 

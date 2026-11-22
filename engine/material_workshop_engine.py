@@ -932,6 +932,50 @@ def split_footer_run(run: Any, index: int) -> Any:
     return tail
 
 
+def footer_field_span(p: Any, start: Any, end: Any) -> list[Any]:
+    """Isolate direct paragraph children belonging to this field, including its cached value."""
+    from docx.oxml.ns import qn
+
+    left = start if start.tag == qn("w:fldSimple") else start.getparent()
+    right = end if end.tag == qn("w:fldSimple") else end.getparent()
+    if left.getparent() is not p or right.getparent() is not p:
+        raise ValueError("页码跨段或位于带标记的行内内容中。请确认是否允许把页码移到独立段落。")
+    if left is not start and any(c.tag != qn("w:rPr") for c in list(left)[:left.index(start)]):
+        left = split_footer_run(left, left.index(start))
+        right = end.getparent()
+    if right is not end and right.index(end) + 1 < len(right):
+        split_footer_run(right, right.index(end) + 1)
+    return list(p)[p.index(left):p.index(right) + 1]
+
+
+def remove_footer_page_fields(footer: Any, pages: list[tuple[str, Any, Any]]) -> None:
+    """Remove only standalone PAGE fields. Preserve all other text, counters and objects."""
+    from docx.oxml.ns import qn
+
+    root = footer._element
+    affected = []
+    run_children = {qn("w:" + tag) for tag in ("rPr", "instrText", "fldChar", "t", "pgNum", "tab", "ptab")}
+    for _, start, end in pages:
+        paragraph = next(start.iterancestors(qn("w:p")), None)
+        if paragraph is None or paragraph.getparent() is not root:
+            raise ValueError("页码位于表格、文本框或特殊容器中，需要根据实际版式处理。")
+        if paragraph.xpath(".//w:bookmarkStart | .//w:bookmarkEnd | .//w:commentRangeStart | .//w:commentRangeEnd | .//w:ins | .//w:del"):
+            raise ValueError("页码和书签、批注或修订共用一段，需要根据标记范围处理。")
+        span = footer_field_span(paragraph, start, end)
+        for node in span:
+            runs = list(node) if node.tag == qn("w:fldSimple") else [node]
+            if any(run.tag != qn("w:r") or any(child.tag not in run_children for child in run) for run in runs):
+                raise ValueError("旧页码域内含有其他对象，需要先确认该对象的处理方式。")
+        for node in span:
+            paragraph.remove(node)
+        if paragraph not in affected:
+            affected.append(paragraph)
+    # Remove emptied number lines, leaving paragraphs with literal text or fields untouched.
+    for paragraph in affected:
+        if all(child.tag == qn("w:pPr") for child in paragraph) and len(root) > 1:
+            root.remove(paragraph)
+
+
 def align_footer_number(footer: Any, fields: list[tuple[str, Any, Any]]) -> int:
     from copy import deepcopy
     from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -950,16 +994,7 @@ def align_footer_number(footer: Any, fields: list[tuple[str, Any, Any]]) -> int:
     for _, start, end in fields:
         if next(start.iterancestors(qn("w:p")), None) is not p:
             continue
-        left = start if start.tag == qn("w:fldSimple") else start.getparent()
-        right = end if end.tag == qn("w:fldSimple") else end.getparent()
-        if left.getparent() is not p or right.getparent() is not p:
-            raise ValueError("页码跨段或位于带标记的行内内容中。请确认是否允许把页码移到独立段落。")
-        if left is not start and any(c.tag != qn("w:rPr") for c in list(left)[:left.index(start)]):
-            left = split_footer_run(left, left.index(start))
-            right = end.getparent()
-        if right is not end and right.index(end) + 1 < len(right):
-            split_footer_run(right, right.index(end) + 1)
-        eligible.update(list(p)[p.index(left):p.index(right) + 1])
+        eligible.update(footer_field_span(p, start, end))
     # Keep page labels and counters such as “— 3 —” and “第 3 页 / 共 8 页” together.
     content = [child for child in p if child.tag != qn("w:pPr")]
     for child in content:
@@ -1017,7 +1052,7 @@ def align_footer_number(footer: Any, fields: list[tuple[str, Any, Any]]) -> int:
     return int(changed)
 
 
-def center_footer_page_numbers(document: Any) -> int:
+def center_footer_page_numbers(document: Any, replace_existing: bool = False) -> int:
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
 
@@ -1034,11 +1069,14 @@ def center_footer_page_numbers(document: Any) -> int:
             if root in seen:
                 continue
             seen.add(root)
-            paragraphs = footer.paragraphs
             fields = footer_number_fields(root)
-            if any(kind == "PAGE" for kind, _, _ in fields):
+            pages = [field for field in fields if field[0] == "PAGE"]
+            if pages and replace_existing:
+                remove_footer_page_fields(footer, pages)
+            elif pages:
                 changes += align_footer_number(footer, fields)
                 continue
+            paragraphs = footer.paragraphs
             empty = len(root) == 1 and len(paragraphs) == 1 and all(child.tag == qn('w:pPr') for child in paragraphs[0]._p)
             p = paragraphs[0] if empty else footer.add_paragraph()
             field = OxmlElement('w:fldSimple')
@@ -1166,9 +1204,11 @@ def process_docx(
         else:
             changes += normalize_docx(document)
 
+    replace_page_fields = operation_parameters.get("center_docx_page_numbers", {}).get("replaceExisting") is True
     if "center_docx_page_numbers" in operation_kinds:
-        changes += center_footer_page_numbers(document)
-    clear_docx_metadata(document)
+        changes += center_footer_page_numbers(document, replace_existing=replace_page_fields)
+    if not (replace_page_fields and operation_kinds == {"center_docx_page_numbers"}):
+        clear_docx_metadata(document)
     def save_checked(temporary: Path) -> None:
         document.save(temporary)
         candidate = docx.Document(temporary)

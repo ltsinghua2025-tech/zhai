@@ -48,9 +48,12 @@ pub(crate) fn rpc(
             } else {
                 "2025-06-18"
             };
-            Ok(
-                json!({"protocolVersion":version,"capabilities":{"tools":{}},"serverInfo":{"name":"zhai-files","version":env!("CARGO_PKG_VERSION")},"instructions":"先查找成熟能力，再运行。只使用 tools/list 实际提供的工具；未提供 run_python 时不得绕过隔离器或反复尝试。Word 结构读取/定位编辑用相应工具。输入只用 list_materials 返回的 ID 或工具输出 ID。工具结果为暂存成果，最终必须调用 deliver 选择用户所需文件。失败先检查错误，禁止原样反复重试。"}),
-            )
+            let instructions = if tools.as_array().is_some_and(|items| items.iter().any(|t| t["name"] == "test_candidate")) {
+                "修改能力包后调用 test_candidate 用正式引擎测试。检查真实反馈，必要时更换实现再试。仅使用本轮预先选择的样本。"
+            } else {
+                "先查找成熟能力，再运行。只使用 tools/list 实际提供的工具；未提供 run_python 时不得绕过隔离器或反复尝试。Word 结构读取/定位编辑用相应工具。输入只用 list_materials 返回的 ID 或工具输出 ID。工具结果为暂存成果，最终必须调用 deliver 选择用户所需文件。失败先检查错误，禁止原样反复重试。"
+            };
+            Ok(json!({"protocolVersion":version,"capabilities":{"tools":{}},"serverInfo":{"name":"zhai-files","version":env!("CARGO_PKG_VERSION")},"instructions":instructions}))
         }
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({"tools":tools})),

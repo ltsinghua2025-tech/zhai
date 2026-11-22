@@ -8,7 +8,7 @@ ZHAI 可以批量排版 Word、公文套红、合并 Excel 和处理 PDF。经�
 
 ## 下载与安装
 
-银河麒麟 ARM64 安装包和校验值见 [Linux 0.29.0-1](https://github.com/ltsinghua2025-tech/zhai/releases/tag/v0.29.0-linux)。macOS Apple Silicon 安装包见 [Mac 0.28.2](https://github.com/ltsinghua2025-tech/zhai/releases/tag/v0.28.2)。两个平台分别发布。
+银河麒麟 ARM64 安装包、评审安装说明和校验值见 [Linux 0.29.0-2 下载页](https://github.com/ltsinghua2025-tech/zhai/releases/tag/v0.29.0-2-linux)。macOS Apple Silicon 安装包见 [Mac 0.28.2](https://github.com/ltsinghua2025-tech/zhai/releases/tag/v0.28.2)。
 
 | 系统 | 适用范围 | 安装包 |
 | --- | --- | --- |
@@ -16,13 +16,13 @@ ZHAI 可以批量排版 Word、公文套红、合并 Excel 和处理 PDF。经�
 | Linux | 银河麒麟 V10 SP1 兼容目标，ARM64，使用 WebKitGTK 4.0 | `.deb` |
 | Windows | Windows 10/11，x64，需 WebView2 | 预览 `.exe`（见发布页） |
 
-将 macOS 镜像中的 `zhai.app` 拖入「应用程序」。此版本使用本地签名，未经 Apple 公证。银河麒麟 V10 SP1 ARM64 兼容目标使用 `sudo apt install ./zhai_0.29.0-1_arm64.deb` 安装。需要扫描识字或要升级已装的 OCR 时，同时指定 `./zhai-ocr_0.29.0-1_arm64.deb`。Linux 安装包已在 Ubuntu 20.04 ARM64 对照环境验收。Windows 预览提供离线能力包和兼容接口执行。
+将 macOS 镜像中的 `zhai.app` 拖入「应用程序」。此版本使用本地签名，未经 Apple 公证。手动安装 Linux 主程序时执行 `sudo apt install ./zhai_0.29.0-2_arm64.deb`；需要扫描识字或升级已装 OCR 时，同时指定 `./zhai-ocr_0.29.0-2_arm64.deb`。目标系统为银河麒麟 V10 SP1 ARM64。安装与功能测试在 Ubuntu 20.04 ARM64 对照环境完成。Windows 预览提供离线能力包和兼容接口执行。
 
 ## 配置自己的 API
 
 使用联机文件 Agent 时，在「模型服务」添加 DeepSeek 或兼容接口，填写服务地址、模型 ID 和自己账户的 API Key，先点「测试连接」。自定义兼容接口的地址和模型 ID 以服务商的文档或模型列表为准。首次启动即可在「能力包」直接试用离线功能。
 
-Linux 0.29.0-1 预设天翼云，凭据由使用者自行配置。应用会实测所选网关能否调用工具并接收结果。通过后使用内置 Codex CLI 0.171.0；仅支持聊天接口时使用兼容流程。可以从「设计能力包」开始，也可以把普通对话中成功的文件任务生成测试版，再换样本验证和发布。
+Linux 0.29.0-2 预设天翼云。应用会实测网关能否调用工具并接收结果。通过后，内置 Codex CLI 0.171.0 可连续选工具、试跑，在同一轮根据实际错误调整做法。可以直接「设计能力包」，也可以把普通对话中成功的文件任务保存为测试版，换样本验证后再发布。
 
 公开版随附通用的市民诉求答复示例。使用真实材料前，按所在单位规定核对所用模型服务的访问权限和材料授权。
 

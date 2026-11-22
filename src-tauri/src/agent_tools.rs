@@ -1,4 +1,5 @@
 use super::*;
+use std::hash::{DefaultHasher, Hash, Hasher};
 
 #[derive(Default)]
 struct Memory {
@@ -6,6 +7,7 @@ struct Memory {
     records: Vec<Value>,
     successful_calls: HashMap<String, Value>,
     delivery: Option<(Vec<PathBuf>, Value)>,
+    attempted_actions: HashSet<u64>,
 }
 
 pub(super) struct ToolSession<'a> {
@@ -18,6 +20,7 @@ pub(super) struct ToolSession<'a> {
     pub scratch: &'a Path,
     pub delivery: &'a Path,
     pub attachments: &'a [AgentAttachment],
+    contract: &'a AgentTaskContract,
     memory: Mutex<Memory>,
 }
 
@@ -32,6 +35,7 @@ impl<'a> ToolSession<'a> {
         scratch: &'a Path,
         delivery: &'a Path,
         attachments: &'a [AgentAttachment],
+        contract: &'a AgentTaskContract,
     ) -> Self {
         Self {
             app,
@@ -43,6 +47,7 @@ impl<'a> ToolSession<'a> {
             scratch,
             delivery,
             attachments,
+            contract,
             memory: Mutex::new(Memory::default()),
         }
     }
@@ -78,6 +83,13 @@ impl<'a> ToolSession<'a> {
     pub fn dispatch(&self, name: &str, args: Value) -> Result<Value, String> {
         if self.cancellation.load(Ordering::SeqCst) {
             return Err("任务已取消".into());
+        }
+        // A new inspection, test or implementation is evidence of progress
+        // even if it failed. Polling the catalog and replaying identical calls aren't.
+        if matches!(name, "read_material" | "read_word_structure" | "edit_word" | "run_skill" | "run_python" | "deliver") {
+            let mut hasher = DefaultHasher::new();
+            (name, &args).hash(&mut hasher);
+            self.memory.lock().attempted_actions.insert(hasher.finish());
         }
         match name {
             "list_materials" => Ok(
@@ -331,6 +343,11 @@ impl<'a> ToolSession<'a> {
         self.memory.lock().delivery.is_some()
     }
 
+    pub(super) fn recovery_progress(&self) -> (usize, usize) {
+        let memory = self.memory.lock();
+        (memory.outputs.len(), memory.attempted_actions.len())
+    }
+
     pub(super) fn confirmed_delivery(&self) -> Result<Vec<PathBuf>, String> {
         let memory = self.memory.lock();
         let Some((paths, trace)) = &memory.delivery else { return Ok(Vec::new()); };
@@ -341,6 +358,8 @@ impl<'a> ToolSession<'a> {
 
     fn deliver(&self, args: Value) -> Result<Value, String> {
         let mut memory = self.memory.lock();
+        // A failed replacement must not publish a previously selected stage.
+        memory.delivery = None;
         let selector = args["input"].as_str().unwrap_or("previous");
         if selector == "original" {
             return Err("原始材料不能作为新成果交付".into());
@@ -351,12 +370,12 @@ impl<'a> ToolSession<'a> {
             if is_codex_diagnostic_output(path) { return Err("该阶段包含诊断文件，请选择只包含成品的阶段".into()); }
             validate_generated_artifact(path)?;
         }
+        validate_delivery_contract(&paths, self.contract)?;
         if self.cancellation.load(Ordering::SeqCst) {
             return Err("任务已取消".into());
         }
         // Replacing a delivery selection only affects this turn's dedicated
         // staging directory. Existing session artifacts are never removed.
-        memory.delivery = None;
         fs::create_dir_all(self.delivery).map_err(|e| e.to_string())?;
         for entry in fs::read_dir(self.delivery).map_err(|e| e.to_string())? {
             let path = entry.map_err(|e| e.to_string())?.path();
