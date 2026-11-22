@@ -1178,20 +1178,57 @@ fn check_codex_loopback(app: &AppHandle, state: &AppState, root: &Path, source: 
     Ok(proof)
 }
 
+// Only the installed self-check uses this helper. The source is compiled into
+// the application and never comes from a skill, a file attachment, or a model.
+fn run_fixture_script(root: &Path, source: &'static str, inputs: &Path, outputs: &Path) -> Result<(), String> {
+    for path in [root, inputs, outputs] {
+        fs::create_dir_all(path).map_err(|e| e.to_string())?;
+    }
+    let script = root.join("fixture.py");
+    let request = root.join("fixture-request.json");
+    fs::write(&script, source).map_err(|e| e.to_string())?;
+    write_json_atomic(&request, &json!({
+        "schemaVersion":1, "neverOverwrite":true, "scriptPath":script,
+        "inputDirectory":inputs, "outputDirectory":outputs, "parameters":{}
+    }))?;
+    let result = engine_command()?.arg("--run-agent-script").arg(request).output().map_err(|e| e.to_string())?;
+    if !result.status.success() {
+        return Err(format!("自检样本处理失败：{}", String::from_utf8_lossy(&result.stderr)));
+    }
+    Ok(())
+}
+
 fn check_pdf_merge_delivery(app: &AppHandle, state: &AppState, root: &Path) -> Result<(), String> {
-    let session = create_pipeline_session(state, &root.join("pdf-fixtures"), &[])?;
-    let (_, artifacts) = execute_dynamic_python_scoped(state, &session, "pdf-fixtures",
-        "from pypdf import PdfWriter\ndef run(context, params):\n    out=[]\n    for name,width,count in [('b.pdf',200,2),('a.pdf',100,1)]:\n        writer=PdfWriter()\n        for _ in range(count): writer.add_blank_page(width=width,height=300)\n        p=context.output_dir/name\n        with p.open('wb') as f: writer.write(f)\n        out.append(str(p))\n    return {'summary':'PDF fixtures','outputs':out}\n",
-        None, Arc::new(AtomicBool::new(false)), None, true, false)?;
-    let inputs = artifact_paths(&artifacts);
+    let fixtures = root.join("pdf-fixtures");
+    run_fixture_script(&root.join("make-pdf-fixtures"), r#"from pypdf import PdfWriter
+def run(context, params):
+    outputs = []
+    for name, width, count in [('b.pdf', 200, 2), ('a.pdf', 100, 1)]:
+        writer = PdfWriter()
+        for _ in range(count):
+            writer.add_blank_page(width=width, height=300)
+        path = context.output_dir / name
+        with path.open('wb') as stream:
+            writer.write(stream)
+        outputs.append(str(path))
+    return {'summary': 'PDF fixtures', 'outputs': outputs}
+"#, &root.join("empty"), &fixtures)?;
+    let inputs = vec![fixtures.join("b.pdf"), fixtures.join("a.pdf")];
     let before = inputs.iter().map(|p| sha256_file(p)).collect::<Result<Vec<_>,_>>()?;
     let tool = builtin_tools().into_iter().find(|t| t.id == "merge_pdf").ok_or("missing merge_pdf")?;
     let (_, outputs) = execute_skill_pipeline(app, state, &tool, &inputs, &json!({}), Arc::new(AtomicBool::new(false)), &root.join("pdf-merge"), 1, &mut HashSet::new())?;
     if outputs.len()!=1 { return Err(format!("PDF合并交付数量错误：{}", outputs.len())); }
-    let verify = create_pipeline_session(state, &root.join("verify-pdf-merge"), &outputs)?;
-    execute_dynamic_python_scoped(state, &verify, "verify",
-        "from pypdf import PdfReader\ndef run(context, params):\n    assert len(context.inputs)==1\n    p=PdfReader(context.inputs[0])\n    assert [float(page.mediabox.width) for page in p.pages]==[100,200,200]\n    return {'summary':'PDF三页及顺序通过','outputs':[]}\n",
-        None, Arc::new(AtomicBool::new(false)), None, false, true)?;
+    let verify_inputs = root.join("verify-pdf-merge/inputs");
+    fs::create_dir_all(&verify_inputs).map_err(|e| e.to_string())?;
+    fs::copy(&outputs[0], verify_inputs.join("merged.pdf")).map_err(|e| e.to_string())?;
+    run_fixture_script(&root.join("verify-pdf-merge"), r#"from pypdf import PdfReader
+def run(context, params):
+    assert len(context.inputs) == 1
+    reader = PdfReader(context.inputs[0])
+    widths = [float(page.mediabox.width) for page in reader.pages]
+    assert widths == [100, 200, 200], widths
+    return {'summary': 'PDF三页及顺序通过', 'outputs': []}
+"#, &verify_inputs, &root.join("verify-pdf-merge/output"))?;
     if before != inputs.iter().map(|p| sha256_file(p)).collect::<Result<Vec<_>,_>>()? { return Err("PDF原件被修改".into()); }
     write_json_atomic(&root.join("pdf-merge-proof.json"), &json!({"outputs":outputs,"pages":3,"originalsUnchanged":true}))?;
     Ok(())
