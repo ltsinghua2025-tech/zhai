@@ -37,15 +37,14 @@ try {
     }
 
     Invoke-Checked 'npm.cmd' @('run', 'tauri', 'build', '--', '--target', $target, '--bundles', 'nsis')
-    $env:ZHAI_TEST_PYTHON3 = $python3Env
-    Invoke-Checked 'cargo' @('test', '--locked', '--manifest-path', 'src-tauri/Cargo.toml', '--target', $target, 'process_runner::tests')
-
     $installers = @(Get-ChildItem -Path (Join-Path $release 'bundle/nsis') -Filter '*-setup.exe' -File)
     if ($installers.Count -ne 1) {
         throw "Expected one Windows installer; found $($installers.Count)."
     }
     Write-Output "Windows installer: $($installers[0].FullName)"
     if (!$TestInstaller) {
+        $env:ZHAI_TEST_PYTHON3 = $python3Env
+        Invoke-Checked 'cargo' @('test', '--release', '--locked', '--lib', '--manifest-path', 'src-tauri/Cargo.toml', '--target', $target, 'process_runner::tests')
         return
     }
 
@@ -61,6 +60,8 @@ try {
     if (!(Test-Path $app -PathType Leaf) -or !(Test-Path $engine -PathType Leaf)) {
         throw 'The installed application or its packaged file engine is missing.'
     }
+    $inspectImports = Join-Path $project 'scripts/diagnose-windows-imports.py'
+    Invoke-Checked $python3Env @($inspectImports, $app)
     $originalTemp = $env:TEMP
     $originalTmp = $env:TMP
     try {
@@ -144,6 +145,21 @@ assert row == ("https://ai.ctaigw.cn/v1", 1), "Model profile was not provisioned
             }
         }
     }
+
+    $env:ZHAI_TEST_PYTHON3 = $python3Env
+    $testArgs = @('test', '--release', '--locked', '--lib', '--manifest-path', 'src-tauri/Cargo.toml', '--target', $target)
+    $messages = & cargo @testArgs --no-run --message-format=json
+    if ($LASTEXITCODE -ne 0) {
+        throw "Native Rust test build failed ($LASTEXITCODE)."
+    }
+    $testExecutables = @($messages | ForEach-Object { $_ | ConvertFrom-Json } |
+        Where-Object { $_.reason -eq 'compiler-artifact' -and $_.profile.test -and $_.executable } |
+        ForEach-Object { $_.executable })
+    if ($testExecutables.Count -ne 1) {
+        throw "Expected one Rust library test executable; found $($testExecutables.Count)."
+    }
+    Invoke-Checked $python3Env @($inspectImports, $testExecutables[0])
+    Invoke-Checked 'cargo' ($testArgs + @('process_runner::tests', '--', '--nocapture'))
 } finally {
     Pop-Location
 }
