@@ -18,6 +18,7 @@ import json
 import math
 import os
 import re
+import stat
 import shutil
 import subprocess
 import sys
@@ -108,10 +109,20 @@ def atomic_writer(target: Path, write: Callable[[Path], None]) -> None:
     temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.part")
     try:
         write(temporary)
-        with temporary.open("rb") as stream:
+        # Windows flushes the file with FlushFileBuffers, which requires a
+        # writable handle. A metadata-preserving copy may already be read-only.
+        copied_mode = temporary.stat().st_mode if os.name == "nt" else None
+        read_only = copied_mode is not None and not (copied_mode & stat.S_IWRITE)
+        if read_only:
+            temporary.chmod(copied_mode | stat.S_IWRITE)
+        with temporary.open("r+b" if os.name == "nt" else "rb") as stream:
             os.fsync(stream.fileno())
+        if read_only:
+            temporary.chmod(copied_mode)
         os.replace(temporary, target)
     finally:
+        if os.name == "nt" and temporary.exists():
+            temporary.chmod(stat.S_IWRITE)
         temporary.unlink(missing_ok=True)
 
 
