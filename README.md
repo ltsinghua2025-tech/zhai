@@ -8,13 +8,13 @@ ZHAI 可以批量排版 Word、公文套红、合并 Excel 和处理 PDF。经�
 
 ## 下载与安装
 
-评委请打开下载说明，按电脑系统选择安装包。两个入口中的评委下载按钮均指向腾讯云，可免登录下载。银河麒麟和 Mac 评委版均已配置天翼，安装后即可使用联网文件 Agent。[国内入口（腾讯文档）](https://docs.qq.com/doc/DYktkWlJXZklUTEdZ) · [GitHub 下载页](https://ltsinghua2025-tech.github.io/zhai/download/)
+评委请打开下载说明，按电脑系统选择安装包。银河麒麟和 Mac 评委版均已配置天翼，安装后即可使用联网文件 Agent。Windows 轻量版在本机离线处理文件。[国内入口（腾讯文档）](https://docs.qq.com/doc/DYktkWlJXZklUTEdZ) · [GitHub 下载页](https://ltsinghua2025-tech.github.io/zhai/download/)
 
 | 系统 | 适用范围 | 安装包 |
 | --- | --- | --- |
 | 银河麒麟 · 推荐版 | V10 SP1，ARM64 | 0.29.0-2 评委 ZIP。完整解压，在含有 `安装.sh` 的文件夹打开终端，执行 `bash 安装.sh`。 |
 | Mac · 测试版 | Apple 芯片（M 系列），macOS 13 或更新 | 0.29.0 评委 DMG。打开后将 `zhai.app` 拖入「应用程序」，首次启动会自动配置天翼。 |
-| Windows · 离线工具测试版 | Windows 10 / 11，x64 | 0.29.0。运行 EXE，打开「离线工具」，选择工具并添加文件。包内含 WebView2 离线运行时。 |
+| Windows · 离线工具测试版 | Windows 10 / 11，x64 | 0.29.1 轻量版。运行 EXE，打开「离线工具」，选择工具并添加文件。已装 WebView2 的电脑可断网安装，缺少时安装器会联网补齐。 |
 
 Mac 测试版使用本地签名。首次打开若提示无法验证开发者，可在「系统设置 → 隐私与安全性」选择「仍要打开」。GitHub 另有自行配置模型的通用版和校验值。[Mac 0.29.0 测试版发行说明](https://github.com/ltsinghua2025-tech/zhai/releases/tag/v0.29.0-macos-beta)
 
@@ -22,7 +22,7 @@ Mac 测试版使用本地签名。首次打开若提示无法验证开发者，�
 
 ## 配置自己的 API
 
-Windows 离线工具版使用本机文件引擎，无需账号或 API。安装包及 SHA-256 见 [Windows 0.29.0 离线工具测试版](https://github.com/ltsinghua2025-tech/zhai/releases/tag/v0.29.0-windows-offline-beta)。以下模型设置适用于有联网 Agent 的桌面版本。
+Windows 离线工具版使用本机文件引擎，无需账号或 API。可读取 Word 和 Excel、批量修改文字、合并 Word、按一级标题拆章、按表头汇总 Excel、按工作表拆分，并可处理 PDF。DOC 转 DOCX 等旧格式转换需要本机安装 LibreOffice。安装包、中文说明和校验值见 [Windows 0.29.1 离线工具测试版](https://github.com/ltsinghua2025-tech/zhai/releases/tag/v0.29.1-windows-offline-beta)。以下模型设置适用于有联网 Agent 的桌面版本。
 
 使用通用版或希望接入自己的模型时，在「模型服务」添加 DeepSeek 或兼容接口，填写服务地址、模型 ID 和自己账户的 API Key，再点「测试连接」。自定义兼容接口的地址和模型 ID 以服务商的文档或模型列表为准。首次启动即可在「能力包」直接试用离线功能。
 
