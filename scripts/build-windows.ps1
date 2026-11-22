@@ -10,9 +10,29 @@ $project = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $python3 = (Resolve-Path $Python3Path).Path
 $target = 'x86_64-pc-windows-msvc'
 $release = Join-Path $project "src-tauri/target/$target/release"
-$scratch = Join-Path ([IO.Path]::GetTempPath()) ("zhai-build-" + [guid]::NewGuid().ToString('N'))
+$tempRoot = if ($env:GITHUB_ACTIONS -eq 'true') { "$($env:SystemDrive)\" } else { [IO.Path]::GetTempPath() }
+$scratch = Join-Path $tempRoot ("zhai-build-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $scratch | Out-Null
 $ruleNames = @()
+$oldProxy = @{}
+
+function Add-TestProgramBlock([string] $File) {
+    $path = (Resolve-Path -LiteralPath $File).ProviderPath
+    $name = 'zhai-offline-test-' + [guid]::NewGuid().ToString('N')
+    try {
+        New-NetFirewallRule -Name $name -DisplayName $name -Direction Outbound -Action Block -Program $path -Profile Any -ErrorAction Stop | Out-Null
+        $script:ruleNames += $name
+        Write-Output "Firewall blocked outbound: $path"
+    } catch {
+        Write-Output "Firewall unavailable for $path ($($_.Exception.Message)). Dead proxies and browser network emulation remain active."
+    }
+}
+
+function Restore-Proxy {
+    foreach ($key in $oldProxy.Keys) {
+        [Environment]::SetEnvironmentVariable($key, $oldProxy[$key], 'Process')
+    }
+}
 
 function Invoke-Checked {
     param([string] $Program, [string[]] $Arguments)
@@ -67,16 +87,27 @@ try {
         $app = Join-Path $install 'material-workshop-desktop.exe'
         $engine = Join-Path $install 'material-workshop-engine.exe'
         if ($env:GITHUB_ACTIONS -eq 'true') {
-            foreach ($program in @($installer, $app, $engine, (Join-Path $env:TEMP 'MicrosoftEdgeWebView2RuntimeInstaller.exe'))) {
-                $name = 'zhai-offline-test-' + [guid]::NewGuid().ToString('N')
-                New-NetFirewallRule -DisplayName $name -Direction Outbound -Action Block -Program $program -Profile Any | Out-Null
-                $ruleNames += $name
+            foreach ($key in @('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY')) {
+                $oldProxy[$key] = [Environment]::GetEnvironmentVariable($key, 'Process')
             }
-            Write-Output 'Outbound Windows firewall blocks installed for the setup, desktop, sidecar and runtime installer.'
+            $env:HTTP_PROXY = 'http://127.0.0.1:9'
+            $env:HTTPS_PROXY = $env:HTTP_PROXY
+            $env:ALL_PROXY = $env:HTTP_PROXY
+            $env:NO_PROXY = '127.0.0.1,localhost,.localhost'
+            $localSetup = Join-Path $scratch 'offline-setup.exe'
+            Copy-Item $installer $localSetup
+            if ((Get-FileHash $localSetup).Hash -ne (Get-FileHash $installer).Hash) { throw 'C: setup copy differs.' }
+            $installer = $localSetup
+            Add-TestProgramBlock $installer
         }
         $process = Start-Process -FilePath $installer -ArgumentList '/S', "/D=$install" -Wait -PassThru
         if ($process.ExitCode -ne 0 -or !(Test-Path $app -PathType Leaf) -or !(Test-Path $engine -PathType Leaf)) {
             throw "Offline setup failed ($($process.ExitCode)) or installed files are missing."
+        }
+        if ($env:GITHUB_ACTIONS -eq 'true') {
+            Add-TestProgramBlock $app
+            Add-TestProgramBlock $engine
+            Write-Output "Offline acceptance network mode: dead HTTP(S) proxy, WebView offline emulation; $($ruleNames.Count) per-program outbound firewall rules."
         }
         $unexpected = @(Get-ChildItem $install -File -Recurse | Where-Object { $_.Name -match '(?i)codex.*\.exe$|judge.*\.key$|private-config\.json$' })
         if ($unexpected) { throw 'Unexpected online runtime or provisioning material in offline installation.' }
@@ -115,7 +146,7 @@ try {
             $listener.Start()
             $port = $listener.LocalEndpoint.Port
             $listener.Stop()
-            $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=$port --remote-debugging-address=127.0.0.1 --disable-background-networking"
+            $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=$port --remote-debugging-address=127.0.0.1 --disable-background-networking --proxy-server=http://127.0.0.1:9 --proxy-bypass-list=localhost;127.0.0.1;*.localhost"
             $gui = Start-Process -FilePath $app -PassThru
             try {
                 Invoke-Checked 'node' @((Join-Path $project 'scripts/check-windows-offline-gui.mjs'), "$port")
@@ -132,6 +163,7 @@ try {
         }
     }
 
+    Restore-Proxy
     $env:ZHAI_TEST_PYTHON3 = $python3Env
     $argsForTests = @('test', '--release', '--locked', '--lib', '--features', 'windows-offline', '--manifest-path', 'src-tauri/Cargo.toml', '--target', $target)
     $messages = & cargo @argsForTests --no-run --message-format=json
@@ -142,7 +174,9 @@ try {
     if ($binaries.Count -ne 1) { throw 'Expected one native Rust library test executable.' }
     Invoke-Checked $python3Env @((Join-Path $project 'scripts/diagnose-windows-imports.py'), $binaries[0])
     Invoke-Checked $binaries[0] @('process_runner::tests', '--nocapture')
+    Invoke-Checked $binaries[0] @('offline_install_has_only_builtin_local_tools_and_no_model_profile', '--nocapture')
 } finally {
+    Restore-Proxy
     foreach ($name in $ruleNames) {
         Remove-NetFirewallRule -DisplayName $name -ErrorAction SilentlyContinue
     }
