@@ -7,6 +7,7 @@ SOURCE="$PROJECT_DIR/native/vision-ocr/main.swift"
 TARGET="$PROJECT_DIR/src-tauri/binaries/material-workshop-vision-ocr-aarch64-apple-darwin"
 
 xcrun swiftc "$SOURCE" \
+  -target arm64-apple-macos13.0 \
   -O \
   -framework AppKit \
   -framework PDFKit \

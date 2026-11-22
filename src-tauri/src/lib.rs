@@ -48,10 +48,8 @@ const OUTPUT_ROOT_NAME: &str = "zhai";
 const KEYCHAIN_SERVICE: &str = "cn.materialworkbench.desktop";
 const TIANYI_PROFILE_ID: &str = "zhai-tianyi";
 const TIANYI_BASE_URL: &str = "https://ai.ctaigw.cn/v1";
-#[cfg(any(target_os = "linux", test))]
 const TIANYI_DEFAULT_MODEL: &str = "deepseek-v4-flash-0731-new";
 
-#[cfg(any(target_os = "linux", test))]
 fn seed_tianyi_profile(connection: &Connection) -> rusqlite::Result<usize> {
     connection.execute(
         "INSERT OR IGNORE INTO ai_profiles(id,provider,display_name,base_url,default_model)
@@ -1332,7 +1330,6 @@ impl AppState {
             "UPDATE ai_profiles SET default_model='deepseek-v4-pro' WHERE provider='deepseek' AND default_model='deepseek-reasoner'",
             [],
         );
-        #[cfg(target_os = "linux")]
         seed_tianyi_profile(&connection).map_err(|e| format!("无法配置天翼云默认模型：{e}"))?;
         // A force-quit cannot deliver the normal cancellation event.  Do not
         // leave ghost "running" sessions or tool cards after the next launch.
@@ -9116,6 +9113,28 @@ fn cancel_agent_turn(session_id: String, turn_id: Option<String>, state: State<'
     Ok(())
 }
 
+#[cfg(all(not(feature = "kylin-legacy"), any(target_os = "macos", target_os = "windows")))]
+fn import_bundled_tianyi_access(app: &AppHandle, state: &AppState) -> Result<(), String> {
+    let marker = state.data_dir.join("judge-tianyi-initialized");
+    if marker.exists() {
+        return Ok(());
+    }
+    let resource = app.path().resource_dir().map_err(|e| e.to_string())?.join("judge-tianyi.key");
+    let key = match fs::read_to_string(resource) {
+        Ok(key) => key,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("无法读取随包天翼授权：{e}")),
+    };
+    let profile = get_ai_profile(state, TIANYI_PROFILE_ID)?;
+    if profile.provider != "openai_compatible" || profile.base_url != TIANYI_BASE_URL {
+        return Err("天翼档案与随包授权的服务地址不一致".into());
+    }
+    if !profile.key_stored {
+        save_key(state, TIANYI_PROFILE_ID, &key)?;
+    }
+    fs::write(marker, []).map_err(|e| format!("无法记录授权初始化状态：{e}"))
+}
+
 fn save_key(state: &AppState, profile_id: &str, api_key: &str) -> Result<(), String> {
     if api_key.trim().is_empty() {
         return Err("API 密钥不能为空".into());
@@ -13530,6 +13549,10 @@ pub fn run() {
                 return Ok(());
             }
             let state = AppState::new(&app.handle())?;
+            #[cfg(all(not(feature = "kylin-legacy"), any(target_os = "macos", target_os = "windows")))]
+            if let Err(error) = import_bundled_tianyi_access(&app.handle(), &state) {
+                eprintln!("天翼授权初始化失败：{error}");
+            }
             let threshold = (Utc::now() - chrono::Duration::days(30)).to_rfc3339();
             let _ = state
                 .db
