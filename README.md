@@ -14,13 +14,15 @@ ZHAI 可以批量排版 Word、公文套红、合并 Excel 和处理 PDF。经�
 | --- | --- | --- |
 | 银河麒麟 · 推荐版 | V10 SP1，ARM64 | 0.29.0-2 评委 ZIP。完整解压，在含有 `安装.sh` 的文件夹打开终端，执行 `bash 安装.sh`。 |
 | Mac · 测试版 | Apple 芯片（M 系列），macOS 13 或更新 | 0.29.0 评委 DMG。打开后将 `zhai.app` 拖入「应用程序」，首次启动会自动配置天翼。 |
-| Windows · 测试版 | Windows 10 / 11，x64，需 WebView2 | 0.29.0 待发布。原生安装包通过验收后会更新到同一下载页。 |
+| Windows · 离线工具测试版 | Windows 10 / 11，x64 | 0.29.0。运行 EXE，打开「离线工具」，选择工具并添加文件。包内含 WebView2 离线运行时。 |
 
 Mac 测试版使用本地签名。首次打开若提示无法验证开发者，可在「系统设置 → 隐私与安全性」选择「仍要打开」。GitHub 另有自行配置模型的通用版和校验值。[Mac 0.29.0 测试版发行说明](https://github.com/ltsinghua2025-tech/zhai/releases/tag/v0.29.0-macos-beta)
 
 麒麟版安装与功能测试在 Ubuntu 20.04 ARM64 对照环境完成。需要手动安装 DEB 时，可执行 `sudo apt install ./zhai_0.29.0-2_arm64.deb`，安装或升级 OCR 时在同一命令中加入 `./zhai-ocr_0.29.0-2_arm64.deb`。[银河麒麟 0.29.0-2 发行说明与校验值](https://github.com/ltsinghua2025-tech/zhai/releases/tag/v0.29.0-2-linux)
 
 ## 配置自己的 API
+
+Windows 离线工具版使用本机文件引擎，无需账号或 API。安装包及 SHA-256 见 [Windows 0.29.0 离线工具测试版](https://github.com/ltsinghua2025-tech/zhai/releases/tag/v0.29.0-windows-offline-beta)。以下模型设置适用于有联网 Agent 的桌面版本。
 
 使用通用版或希望接入自己的模型时，在「模型服务」添加 DeepSeek 或兼容接口，填写服务地址、模型 ID 和自己账户的 API Key，再点「测试连接」。自定义兼容接口的地址和模型 ID 以服务商的文档或模型列表为准。首次启动即可在「能力包」直接试用离线功能。
 
