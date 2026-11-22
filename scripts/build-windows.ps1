@@ -113,6 +113,37 @@ try {
         throw 'The judge installation failed to provision its synthetic resource.'
     }
     Write-Output 'Judge bootstrap installed the expected synthetic resource.'
+    if ($env:GITHUB_ACTIONS -eq 'true') {
+        # Only launch a synthetic judge build in a disposable CI user's profile.
+        $dataDir = Join-Path $env:APPDATA 'cn.materialworkbench.desktop'
+        $database = Join-Path $dataDir 'history.sqlite3'
+        $marker = Join-Path $dataDir 'judge-tianyi-initialized'
+        if ((Test-Path $database) -or (Test-Path $marker)) {
+            throw 'The native first-run check requires a fresh Windows user profile.'
+        }
+        $gui = Start-Process -FilePath $app -PassThru
+        try {
+            $deadline = [DateTime]::UtcNow.AddSeconds(60)
+            while (!(Test-Path $marker) -and !$gui.HasExited -and [DateTime]::UtcNow -lt $deadline) {
+                Start-Sleep -Milliseconds 300
+            }
+            if (!(Test-Path $marker) -or !(Test-Path $database)) {
+                throw 'Normal application startup did not finish provisioning.'
+            }
+            $query = @'
+import sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as db:
+    row = db.execute("SELECT base_url, key_stored FROM ai_profiles WHERE id=?", ("zhai-tianyi",)).fetchone()
+assert row == ("https://ai.ctaigw.cn/v1", 1), "Model profile was not provisioned"
+'@
+            Invoke-Checked $python3 @('-c', $query, $database)
+            Write-Output 'Fresh Windows GUI startup saved the synthetic judge profile in Credential Manager.'
+        } finally {
+            if (!$gui.HasExited) {
+                Stop-Process -Id $gui.Id -Force
+            }
+        }
+    }
 } finally {
     Pop-Location
 }
